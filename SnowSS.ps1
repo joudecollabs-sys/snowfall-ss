@@ -1,5 +1,5 @@
 # =====================================================================
-#  SnowFall SS v2.0 - outil de screenshare du staff SnowFall
+#  SnowFall SS v3.0 - outil de screenshare du staff SnowFall
 #
 #  CE QUE FAIT CE SCRIPT (lecture seule) :
 #    - ouvre une fenetre qui affiche le resultat du scan par categorie
@@ -26,7 +26,7 @@
 $SS_Heures        = 48       # fenetre "recent" en heures
 $SS_SeuilModrinth = 2000     # en dessous, le jar est fouille meme s'il est sur Modrinth
 $SS_Reseau        = $true    # $false = pas d'appel a Modrinth
-$SS_Version       = '2.0'
+$SS_Version       = '3.0'
 
 $ErrorActionPreference = 'SilentlyContinue'
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
@@ -90,10 +90,11 @@ function Set-Etape {
     param([int]$Pct, [string]$Texte)
     if ($script:Annule) { throw 'SCAN_ANNULE' }
     if ($script:UI) {
-        $script:UI.Barre.Value = [Math]::Min(100, [Math]::Max(0, $Pct))
+        $script:UI.Barre.Width = [Math]::Max(0, $script:UI.BarreFond.ActualWidth * [Math]::Min(100, $Pct) / 100)
         $script:UI.Statut.Text = $Texte
         Update-Navigation
-        [Windows.Forms.Application]::DoEvents()
+        if ($script:SS_Resultats.Count -ne $script:NbAffiche) { Show-Categorie $script:CatActive }
+        Invoke-PompeUi
     } elseif ($Texte -notmatch '\(\d+/\d+\)|^Analyse de la cl') {
         Write-Host ''
         Write-Host "=== $Texte ===" -ForegroundColor Cyan
@@ -102,7 +103,7 @@ function Set-Etape {
 
 function Invoke-Pompe {
     if ($script:Annule) { throw 'SCAN_ANNULE' }
-    if ($script:UI) { [Windows.Forms.Application]::DoEvents() }
+    if ($script:UI) { Invoke-PompeUi }
 }
 
 function Format-Taille {
@@ -436,6 +437,7 @@ function Invoke-ScanMods {
         }
     }
 
+    $script:SS_NbJars = $jars.Count
     Set-Etape 22 ('Calcul des empreintes ({0} jars)...' -f $jars.Count)
     foreach ($j in $jars) { $j.Sha1 = (Get-FileHash -LiteralPath $j.Chemin -Algorithm SHA1).Hash.ToLower(); Invoke-Pompe }
     $hashes = @($jars | Where-Object { $_.Sha1 } | ForEach-Object { $_.Sha1 } | Sort-Object -Unique)
@@ -568,6 +570,7 @@ function Invoke-ScanUsb {
         $parent = (Get-PnpDeviceProperty -InstanceId $dv.InstanceId -KeyName 'DEVPKEY_Device_Parent').Data
         if ("$parent" -like 'USB\*') { $devs += $dv }
     }
+    $script:SS_NbHistUsb = $devs.Count
     if ($devs.Count -eq 0) { Add-Res Usb OK 'Historique des clés USB' 'Aucune clé USB n''a été branchée sur ce PC (selon Windows).'; return }
     $hist = @()
     foreach ($dv in $devs) {
@@ -645,16 +648,25 @@ function Get-Compte {
 function Update-Verdict {
     $r = Get-Compte Resume ROUGE
     $o = Get-Compte Resume ORANGE
-    if ($script:ScanEnCours) { $txt = 'Scan en cours...'; $niv = 'ACCENT' }
-    elseif ($r -gt 0) { $txt = "SUSPECT  ·  $r rouge(s), $o orange(s)"; $niv = 'ROUGE' }
-    elseif ($o -gt 0) { $txt = "À VÉRIFIER  ·  $o point(s) orange à regarder avec le joueur"; $niv = 'ORANGE' }
-    else { $txt = 'RIEN DE SUSPECT TROUVÉ'; $niv = 'OK' }
-    $script:VerdictTexte = 'VERDICT : ' + $txt
+    if ($script:ScanEnCours) {
+        $titre = 'Scan en cours...'; $sous = 'Analyse du PC du joueur, ne ferme pas la fenêtre.'; $niv = 'ACCENT'; $glyphe = [string][char]0xE895
+    } elseif ($r -gt 0) {
+        $titre = 'SUSPECT'; $sous = "$r alerte(s) rouge et $o orange : triche probable, regarde le détail ci-dessous."; $niv = 'ROUGE'; $glyphe = [string][char]0xEA39
+    } elseif ($o -gt 0) {
+        $titre = 'À VÉRIFIER'; $sous = "$o point(s) orange à regarder avec le joueur."; $niv = 'ORANGE'; $glyphe = [string][char]0xE7BA
+    } else {
+        $titre = 'RIEN DE SUSPECT'; $sous = 'Aucune alerte. Un scan propre ne prouve pas à 100 % que le joueur est clean.'; $niv = 'OK'; $glyphe = [string][char]0xE73E
+    }
+    $script:VerdictTexte = 'VERDICT : ' + $titre + '  ·  ' + $sous
     if ($script:UI) {
-        $c = $script:Couleurs[$niv]
-        $script:UI.Verdict.Text = $txt
-        $script:UI.Verdict.ForeColor = $c
-        $script:UI.Bande.BackColor = $c
+        $p = $script:Pinceaux[$niv]
+        $script:UI.Verdict.Text = $titre
+        $script:UI.Verdict.Foreground = $p.C
+        $script:UI.SousVerdict.Text = $sous
+        $script:UI.Rond.Background = $p.F
+        $script:UI.IconeVerdict.Text = $glyphe
+        $script:UI.IconeVerdict.Foreground = $p.C
+        $script:UI.Barre.Background = $p.C
     }
 }
 
@@ -665,13 +677,14 @@ function Get-TexteRapport {
     [void]$sb.AppendLine($script:VerdictTexte)
     foreach ($cle in $SS_Categories.Keys) {
         if ($cle -eq 'Resume') { continue }
-        $rows = @($script:SS_Resultats | Where-Object { $_.Cat -eq $cle })
+        $rows = New-Object System.Collections.Generic.List[object]
+        foreach ($x in $script:SS_Resultats) { if ($x.Cat -eq $cle) { $rows.Add($x) } }
         if ($rows.Count -eq 0) { continue }
         [void]$sb.AppendLine('')
         [void]$sb.AppendLine('=== ' + $SS_Categories[$cle] + ' ===')
         foreach ($r in $rows) {
             [void]$sb.AppendLine(('[{0}] {1} : {2}' -f $r.Niveau, $r.Titre, $r.Detail))
-            if ($r.Chemin -and $r.Detail -notlike "*$($r.Chemin)*") { [void]$sb.AppendLine('        -> ' + $r.Chemin) }
+            if ($r.Chemin -and -not "$($r.Detail)".Contains($r.Chemin)) { [void]$sb.AppendLine('        -> ' + $r.Chemin) }
         }
     }
     [void]$sb.AppendLine('')
@@ -689,10 +702,15 @@ function Start-Scan {
     $script:ScanEnCours = $true
     $script:Annule = $false
     $script:SS_Resultats.Clear()
+    $script:SS_NbJars = 0
+    $script:SS_NbHistUsb = 0
+    $script:SS_Usb = @()
     $script:SS_Depuis = (Get-Date).AddHours(-$SS_Heures)
     if ($script:UI) {
-        foreach ($b in $script:UI.Actions) { $b.Enabled = $false }
+        foreach ($b in $script:UI.Actions) { $b.IsEnabled = $false }
+        $script:UI.InfoRapport.Text = ''
         Update-Verdict
+        Update-Navigation
         Show-Categorie 'Resume'
     }
     try {
@@ -712,36 +730,67 @@ function Start-Scan {
     Update-Verdict
     Save-Rapport
     if ($script:UI) {
-        $script:UI.Barre.Value = 100
-        if ($script:SS_Fichier) { $script:UI.Statut.Text = 'Scan terminé · rapport enregistré sur le Bureau' }
-        else { $script:UI.Statut.Text = 'Scan terminé' }
-        foreach ($b in $script:UI.Actions) { $b.Enabled = $true }
+        $script:UI.Barre.Width = $script:UI.BarreFond.ActualWidth
+        $script:UI.Statut.Text = ('Scan terminé à {0:HH:mm:ss}' -f (Get-Date))
+        if ($script:SS_Fichier) { $script:UI.InfoRapport.Text = 'Rapport enregistré : ' + $script:SS_Fichier }
+        foreach ($b in $script:UI.Actions) { $b.IsEnabled = $true }
         Update-Navigation
         Show-Categorie 'Resume'
     }
 }
 
 # =====================================================================
-#  Interface
+#  Interface (WPF)
 # =====================================================================
+$SS_Icones = @{
+    Resume = 0xE80F; Systeme = 0xE770; Minecraft = 0xE7FC; Mods = 0xE74C
+    Programmes = 0xE71D; Usb = 0xE88E; Fichiers = 0xE8A5; Corbeille = 0xE74D
+}
+
+function Invoke-PompeUi {
+    $frame = New-Object System.Windows.Threading.DispatcherFrame
+    $cb = [System.Windows.Threading.DispatcherOperationCallback] { param($f) $f.Continue = $false; return $null }
+    [void][System.Windows.Threading.Dispatcher]::CurrentDispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background, $cb, $frame)
+    [System.Windows.Threading.Dispatcher]::PushFrame($frame)
+}
+
+function New-Pinceau {
+    param([string]$Hex)
+    $b = (New-Object System.Windows.Media.BrushConverter).ConvertFromString($Hex)
+    $b.Freeze()
+    return $b
+}
+
 function Update-Navigation {
     if (-not $script:UI) { return }
     foreach ($cle in $SS_Categories.Keys) {
-        $b = $script:UI.Boutons[$cle]
-        $nom = $SS_Categories[$cle]
+        $n = $script:UI.Nav[$cle]
         $r = Get-Compte $cle ROUGE
         $o = Get-Compte $cle ORANGE
-        if ($r -gt 0) { $b.Text = "     $nom   ($($r + $o))"; $b.ForeColor = $script:Couleurs.ROUGE }
-        elseif ($o -gt 0) { $b.Text = "     $nom   ($o)"; $b.ForeColor = $script:Couleurs.ORANGE }
-        else { $b.Text = "     $nom"; $b.ForeColor = $script:Couleurs.Texte }
+        if ($r -gt 0) { $niv = 'ROUGE' } elseif ($o -gt 0) { $niv = 'ORANGE' } else { $niv = $null }
+        if ($niv) {
+            $p = $script:Pinceaux[$niv]
+            $n.Pastille.Visibility = 'Visible'
+            $n.Pastille.Background = $p.F
+            $n.Compte.Foreground = $p.C
+            $n.Compte.Text = [string]($r + $o)
+        } else {
+            $n.Pastille.Visibility = 'Collapsed'
+        }
     }
+    $script:UI.StatRouge.Text = [string](Get-Compte Resume ROUGE)
+    $script:UI.StatOrange.Text = [string](Get-Compte Resume ORANGE)
+    $script:UI.StatMods.Text = [string]$script:SS_NbJars
+    $script:UI.StatUsb.Text = [string]@($script:SS_Usb).Count
+    $script:UI.StatUsbSous.Text = ('{0} dans l''historique' -f $script:SS_NbHistUsb)
 }
 
 function Show-Categorie {
     param([string]$Cle)
     if (-not $script:UI) { return }
+    $memeCat = ($script:CatActive -eq $Cle)
     $script:CatActive = $Cle
-    $lv = $script:UI.Liste
+    $script:NbAffiche = $script:SS_Resultats.Count
     $rouges = New-Object System.Collections.Generic.List[object]
     $oranges = New-Object System.Collections.Generic.List[object]
     $autres = New-Object System.Collections.Generic.List[object]
@@ -752,301 +801,522 @@ function Show-Categorie {
         elseif ($Cle -ne 'Resume') { $autres.Add($x) }
     }
     $rows = @($rouges.ToArray()) + @($oranges.ToArray()) + @($autres.ToArray())
-    if ($Cle -eq 'Resume' -and $rows.Count -eq 0 -and -not $script:ScanEnCours) {
-        $rows = @([pscustomobject]@{ Cat = 'Resume'; Niveau = 'OK'; Titre = 'Aucune alerte'; Detail = 'Aucun élément rouge ou orange. Regarde quand même les autres catégories.'; Chemin = '' })
+    if ($Cle -eq 'Resume' -and $rows.Count -eq 0) {
+        if ($script:ScanEnCours) {
+            $rows = @([pscustomobject]@{ Cat = 'Resume'; Niveau = 'INFO'; Titre = 'Scan en cours...'; Detail = 'Les alertes apparaîtront ici dès qu''elles sont trouvées.'; Chemin = '' })
+        } else {
+            $rows = @([pscustomobject]@{ Cat = 'Resume'; Niveau = 'OK'; Titre = 'Aucune alerte'; Detail = 'Aucun élément rouge ou orange. Regarde quand même les autres catégories.'; Chemin = '' })
+        }
     }
-    $lv.BeginUpdate()
-    $lv.Items.Clear()
+    $items = New-Object System.Collections.ObjectModel.ObservableCollection[object]
     foreach ($r in $rows) {
+        $p = $script:Pinceaux[$r.Niveau]
         $titre = $r.Titre
         if ($Cle -eq 'Resume' -and $r.Cat -ne 'Resume') { $titre = $SS_Categories[$r.Cat] + '  ›  ' + $titre }
-        $it = New-Object Windows.Forms.ListViewItem(('●  ' + $r.Niveau))
-        [void]$it.SubItems.Add($titre)
-        [void]$it.SubItems.Add($r.Detail)
-        $it.ForeColor = $script:Couleurs[$r.Niveau]
-        $it.Tag = $r
-        [void]$lv.Items.Add($it)
+        $chemin = ''; $vis = 'Collapsed'
+        if ($r.Chemin -and -not "$($r.Detail)".Contains($r.Chemin)) { $chemin = $r.Chemin; $vis = 'Visible' }
+        $items.Add([pscustomobject]@{
+            Titre = $titre; Detail = "$($r.Detail)"; Chemin = $chemin; CheminVis = $vis
+            Couleur = $p.C; FondPill = $p.F; NiveauTexte = $r.Niveau; Source = $r
+        })
     }
-    $lv.EndUpdate()
-    foreach ($k in $script:UI.Boutons.Keys) { $script:UI.Boutons[$k].BackColor = $script:Couleurs.Panneau }
-    $script:UI.Boutons[$Cle].BackColor = $script:Couleurs.Actif
+    $script:UI.Liste.ItemsSource = $items
     $script:UI.TitreListe.Text = $SS_Categories[$Cle]
-    $script:UI.Detail.Text = 'Clique sur une ligne pour voir le détail. Double-clic : ouvrir l''emplacement du fichier.'
-    Set-Colonnes
-}
-
-function Set-Colonnes {
-    if (-not $script:UI) { return }
-    $lv = $script:UI.Liste
-    if ($script:DansColonnes) { return }
-    $script:DansColonnes = $true
-    try {
-        $w = $lv.Width - $lv.Columns[0].Width - $lv.Columns[1].Width - 2
-        $hauteurLigne = 30
-        if ($lv.Items.Count -gt 0) { $hauteurLigne = $lv.GetItemRect(0).Height }
-        if (($lv.Items.Count + 1) * $hauteurLigne -gt $lv.Height) { $w -= [Windows.Forms.SystemInformation]::VerticalScrollBarWidth + 6 }
-        if ($w -gt 100 -and $lv.Columns[2].Width -ne $w) { $lv.Columns[2].Width = $w }
-    } finally { $script:DansColonnes = $false }
+    $script:UI.CompteListe.Text = ('{0} élément(s)' -f $rows.Count)
+    if (-not $memeCat) { $script:UI.Defile.ScrollToTop() }
+    $script:ChangeNav = $true
+    try { $script:UI.Nav[$Cle].Bouton.IsChecked = $true } finally { $script:ChangeNav = $false }
 }
 
 function Open-Emplacement {
-    if ($script:UI.Liste.SelectedItems.Count -eq 0) { return }
-    $c = $script:UI.Liste.SelectedItems[0].Tag.Chemin
+    param($Item)
+    if (-not $Item -or -not $Item.Source) { return }
+    $c = $Item.Source.Chemin
     if (-not $c -or -not (Test-Path -LiteralPath $c)) { return }
     if ((Get-Item -LiteralPath $c -Force).PSIsContainer) { Start-Process explorer.exe -ArgumentList ('"' + $c + '"') }
     else { Start-Process explorer.exe -ArgumentList ('/select,"' + $c + '"') }
 }
 
-function New-Bouton {
-    param([string]$Texte, [bool]$Principal = $false)
-    $b = New-Object Windows.Forms.Button
-    $b.Text = $Texte
-    $b.AutoSize = $true
-    $b.AutoSizeMode = 'GrowAndShrink'
-    $b.Padding = New-Object Windows.Forms.Padding(14, 6, 14, 6)
-    $b.Margin = New-Object Windows.Forms.Padding(8, 0, 0, 0)
-    $b.FlatStyle = 'Flat'
-    $b.FlatAppearance.BorderColor = $script:Couleurs.Bord
-    $b.Cursor = 'Hand'
-    if ($Principal) {
-        $b.BackColor = $script:Couleurs.ACCENT
-        $b.ForeColor = $script:Couleurs.Fond
-        $b.FlatAppearance.BorderSize = 0
-        $b.Font = New-Object Drawing.Font('Segoe UI Semibold', 10)
-    } else {
-        $b.BackColor = $script:Couleurs.Carte
-        $b.ForeColor = $script:Couleurs.Texte
-        $b.FlatAppearance.BorderSize = 1
+function Get-ItemSous {
+    param($Element)
+    $e = $Element
+    while ($e) {
+        if ($e.DataContext -and $e.DataContext.PSObject.Properties['Source']) { return $e.DataContext }
+        if ($e -is [System.Windows.Media.Visual] -or $e -is [System.Windows.Media.Media3D.Visual3D]) { $e = [System.Windows.Media.VisualTreeHelper]::GetParent($e) }
+        elseif ($e.Parent) { $e = $e.Parent }
+        else { return $null }
     }
-    return $b
+    return $null
 }
 
+$SS_Xaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="SnowFall SS" Width="1260" Height="820" MinWidth="1000" MinHeight="640"
+        WindowStartupLocation="CenterScreen" WindowStyle="None" AllowsTransparency="True"
+        Background="Transparent" ResizeMode="CanResizeWithGrip" FontFamily="Segoe UI"
+        TextOptions.TextFormattingMode="Display" UseLayoutRounding="True">
+  <Window.Resources>
+    <FontFamily x:Key="Icones">Segoe Fluent Icons, Segoe MDL2 Assets</FontFamily>
+
+    <Style x:Key="Nav" TargetType="RadioButton">
+      <Setter Property="Foreground" Value="#C3CEE0"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Margin" Value="0,0,0,4"/>
+      <Setter Property="GroupName" Value="Nav"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="RadioButton">
+            <Border x:Name="Bd" Background="Transparent" CornerRadius="10" Padding="14,11">
+              <ContentPresenter/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#131C2F"/>
+              </Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#1A2640"/>
+                <Setter Property="Foreground" Value="#FFFFFF"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="Btn" TargetType="Button">
+      <Setter Property="Foreground" Value="#DCE6F5"/>
+      <Setter Property="Background" Value="#141E33"/>
+      <Setter Property="BorderBrush" Value="#24324F"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Margin" Value="10,0,0,0"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="1" CornerRadius="10" Padding="18,10">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bd" Property="Opacity" Value="0.85"/>
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="Bd" Property="Opacity" Value="0.7"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="Bd" Property="Opacity" Value="0.4"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="BtnPrimaire" TargetType="Button" BasedOn="{StaticResource Btn}">
+      <Setter Property="Background" Value="#6EC1FF"/>
+      <Setter Property="BorderBrush" Value="#6EC1FF"/>
+      <Setter Property="Foreground" Value="#06101F"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+    </Style>
+
+    <Style x:Key="BtnFenetre" TargetType="Button">
+      <Setter Property="Foreground" Value="#8B9AB5"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Width" Value="40"/>
+      <Setter Property="Height" Value="32"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Bd" Background="Transparent" CornerRadius="8">
+              <TextBlock Text="{TemplateBinding Content}" FontFamily="{StaticResource Icones}" FontSize="11"
+                         Foreground="{TemplateBinding Foreground}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#1A2540"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="Stat" TargetType="Border">
+      <Setter Property="Background" Value="#0F1729"/>
+      <Setter Property="BorderBrush" Value="#1C2740"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="14"/>
+      <Setter Property="Padding" Value="20,16"/>
+      <Setter Property="Margin" Value="0,0,12,0"/>
+    </Style>
+  </Window.Resources>
+
+  <Border x:Name="Racine" CornerRadius="18" Background="#0A0F1A" BorderBrush="#1E2A42" BorderThickness="1" Margin="14">
+    <Border.Effect>
+      <DropShadowEffect BlurRadius="28" ShadowDepth="0" Opacity="0.6" Color="#000000"/>
+    </Border.Effect>
+    <Grid>
+      <Grid.RowDefinitions>
+        <RowDefinition Height="70"/>
+        <RowDefinition Height="*"/>
+      </Grid.RowDefinitions>
+
+      <!-- Barre de titre -->
+      <Grid x:Name="BarreTitre" Background="Transparent" Margin="22,0,14,0">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+          <Border Width="40" Height="40" CornerRadius="12">
+            <Border.Background>
+              <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                <GradientStop Color="#6EC1FF" Offset="0"/>
+                <GradientStop Color="#3D7BFF" Offset="1"/>
+              </LinearGradientBrush>
+            </Border.Background>
+            <TextBlock Text="❄" FontSize="22" Foreground="#FFFFFF" HorizontalAlignment="Center" VerticalAlignment="Center" FontFamily="Segoe UI Symbol"/>
+          </Border>
+          <StackPanel Margin="14,0,0,0" VerticalAlignment="Center">
+            <TextBlock Text="SnowFall SS" FontSize="19" FontWeight="SemiBold" Foreground="#F2F6FC"/>
+            <TextBlock x:Name="SousTitre" Text="Outil de screenshare du staff" FontSize="12" Foreground="#7D8CA8"/>
+          </StackPanel>
+        </StackPanel>
+        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,14,0">
+          <Border Background="#121B2E" CornerRadius="9" Padding="12,6" Margin="0,0,8,0">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="&#xE7F4;" FontFamily="{StaticResource Icones}" FontSize="13" Foreground="#7D8CA8" VerticalAlignment="Center"/>
+              <TextBlock x:Name="InfoPc" Margin="8,0,0,0" FontSize="12.5" Foreground="#C3CEE0" VerticalAlignment="Center"/>
+            </StackPanel>
+          </Border>
+          <Border x:Name="BadgeAdmin" CornerRadius="9" Padding="12,6">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock x:Name="IconeAdmin" Text="&#xE83D;" FontFamily="{StaticResource Icones}" FontSize="13" VerticalAlignment="Center"/>
+              <TextBlock x:Name="TexteAdmin" Margin="8,0,0,0" FontSize="12.5" FontWeight="SemiBold" VerticalAlignment="Center"/>
+            </StackPanel>
+          </Border>
+        </StackPanel>
+        <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
+          <Button x:Name="BtnMin" Style="{StaticResource BtnFenetre}" Content="&#xE921;"/>
+          <Button x:Name="BtnFermer" Style="{StaticResource BtnFenetre}" Content="&#xE8BB;"/>
+        </StackPanel>
+      </Grid>
+
+      <Grid Grid.Row="1">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="236"/>
+          <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <!-- Navigation -->
+        <DockPanel Margin="16,6,10,18">
+          <TextBlock DockPanel.Dock="Top" Text="CATÉGORIES" FontSize="11" FontWeight="SemiBold" Foreground="#5F6E8A" Margin="14,0,0,10"/>
+          <Border DockPanel.Dock="Bottom" Background="#0F1729" BorderBrush="#1C2740" BorderThickness="1" CornerRadius="12" Padding="14,12">
+            <StackPanel>
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="&#xE72E;" FontFamily="{StaticResource Icones}" FontSize="13" Foreground="#4FD69C" VerticalAlignment="Center"/>
+                <TextBlock Text="Lecture seule" Margin="8,0,0,0" FontSize="12.5" FontWeight="SemiBold" Foreground="#C3CEE0"/>
+              </StackPanel>
+              <TextBlock Text="Rien n'est modifié, supprimé ou envoyé (sauf les empreintes des mods à Modrinth)." TextWrapping="Wrap" FontSize="11.5" Foreground="#6F7E9A" Margin="0,6,0,0"/>
+            </StackPanel>
+          </Border>
+          <StackPanel x:Name="Nav"/>
+        </DockPanel>
+
+        <!-- Contenu -->
+        <Grid Grid.Column="1" Margin="8,6,24,18">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+
+          <!-- Verdict -->
+          <Border CornerRadius="16" BorderBrush="#1E2A42" BorderThickness="1" Padding="26,22">
+            <Border.Background>
+              <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                <GradientStop Color="#13203A" Offset="0"/>
+                <GradientStop Color="#0D1526" Offset="1"/>
+              </LinearGradientBrush>
+            </Border.Background>
+            <Grid>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+              </Grid.ColumnDefinitions>
+              <Border x:Name="Rond" Width="76" Height="76" CornerRadius="38" VerticalAlignment="Center">
+                <TextBlock x:Name="IconeVerdict" FontFamily="{StaticResource Icones}" FontSize="32" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+              </Border>
+              <StackPanel Grid.Column="1" Margin="22,0,0,0" VerticalAlignment="Center">
+                <TextBlock Text="VERDICT" FontSize="11" FontWeight="SemiBold" Foreground="#6F7E9A"/>
+                <TextBlock x:Name="Verdict" FontSize="30" FontWeight="Bold" Margin="0,2,0,0"/>
+                <TextBlock x:Name="SousVerdict" FontSize="13.5" Foreground="#9AA8C2" TextWrapping="Wrap" Margin="0,2,0,0"/>
+                <Grid Margin="0,16,0,0">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                  </Grid.ColumnDefinitions>
+                  <Grid Height="6" VerticalAlignment="Center">
+                    <Border x:Name="BarreFond" Background="#1A2540" CornerRadius="3"/>
+                    <Border x:Name="Barre" HorizontalAlignment="Left" Width="0" CornerRadius="3"/>
+                  </Grid>
+                  <TextBlock x:Name="Statut" Grid.Column="1" Margin="14,0,0,0" FontSize="12" Foreground="#7D8CA8" MinWidth="260" TextTrimming="CharacterEllipsis"/>
+                </Grid>
+              </StackPanel>
+            </Grid>
+          </Border>
+
+          <!-- Stats -->
+          <UniformGrid Grid.Row="1" Columns="4" Margin="0,14,-12,0">
+            <Border Style="{StaticResource Stat}">
+              <StackPanel>
+                <StackPanel Orientation="Horizontal">
+                  <Ellipse Width="8" Height="8" Fill="#FF5C6C" VerticalAlignment="Center"/>
+                  <TextBlock Text="Alertes rouges" Margin="8,0,0,0" FontSize="12.5" Foreground="#8B9AB5"/>
+                </StackPanel>
+                <TextBlock x:Name="StatRouge" Text="0" FontSize="30" FontWeight="Bold" Foreground="#FF5C6C" Margin="0,6,0,0"/>
+                <TextBlock Text="triche quasi certaine" FontSize="11.5" Foreground="#5F6E8A"/>
+              </StackPanel>
+            </Border>
+            <Border Style="{StaticResource Stat}">
+              <StackPanel>
+                <StackPanel Orientation="Horizontal">
+                  <Ellipse Width="8" Height="8" Fill="#FFB547" VerticalAlignment="Center"/>
+                  <TextBlock Text="Alertes orange" Margin="8,0,0,0" FontSize="12.5" Foreground="#8B9AB5"/>
+                </StackPanel>
+                <TextBlock x:Name="StatOrange" Text="0" FontSize="30" FontWeight="Bold" Foreground="#FFB547" Margin="0,6,0,0"/>
+                <TextBlock Text="à vérifier avec le joueur" FontSize="11.5" Foreground="#5F6E8A"/>
+              </StackPanel>
+            </Border>
+            <Border Style="{StaticResource Stat}">
+              <StackPanel>
+                <StackPanel Orientation="Horizontal">
+                  <Ellipse Width="8" Height="8" Fill="#6EC1FF" VerticalAlignment="Center"/>
+                  <TextBlock Text="Mods analysés" Margin="8,0,0,0" FontSize="12.5" Foreground="#8B9AB5"/>
+                </StackPanel>
+                <TextBlock x:Name="StatMods" Text="0" FontSize="30" FontWeight="Bold" Foreground="#E6EDF7" Margin="0,6,0,0"/>
+                <TextBlock Text="comparés à Modrinth" FontSize="11.5" Foreground="#5F6E8A"/>
+              </StackPanel>
+            </Border>
+            <Border Style="{StaticResource Stat}">
+              <StackPanel>
+                <StackPanel Orientation="Horizontal">
+                  <Ellipse Width="8" Height="8" Fill="#4FD69C" VerticalAlignment="Center"/>
+                  <TextBlock Text="Clés USB branchées" Margin="8,0,0,0" FontSize="12.5" Foreground="#8B9AB5"/>
+                </StackPanel>
+                <TextBlock x:Name="StatUsb" Text="0" FontSize="30" FontWeight="Bold" Foreground="#E6EDF7" Margin="0,6,0,0"/>
+                <TextBlock x:Name="StatUsbSous" Text="0 dans l'historique" FontSize="11.5" Foreground="#5F6E8A"/>
+              </StackPanel>
+            </Border>
+          </UniformGrid>
+
+          <!-- Titre de section -->
+          <DockPanel Grid.Row="2" Margin="2,22,0,12">
+            <TextBlock x:Name="CompteListe" DockPanel.Dock="Right" FontSize="12.5" Foreground="#6F7E9A" VerticalAlignment="Bottom"/>
+            <TextBlock x:Name="TitreListe" Text="Résumé" FontSize="18" FontWeight="SemiBold" Foreground="#F2F6FC"/>
+          </DockPanel>
+
+          <!-- Resultats -->
+          <ScrollViewer x:Name="Defile" Grid.Row="3" VerticalScrollBarVisibility="Auto" Padding="0,0,6,0">
+            <ItemsControl x:Name="Liste">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <Border x:Name="Carte" Background="#0F1729" BorderBrush="#1C2740" BorderThickness="1" CornerRadius="12" Margin="0,0,0,8" Cursor="Hand">
+                    <Grid>
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="4"/>
+                        <ColumnDefinition Width="*"/>
+                      </Grid.ColumnDefinitions>
+                      <Border Background="{Binding Couleur}" CornerRadius="12,0,0,12"/>
+                      <Grid Grid.Column="1" Margin="16,12,16,13">
+                        <Grid.ColumnDefinitions>
+                          <ColumnDefinition Width="*"/>
+                          <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel>
+                          <TextBlock Text="{Binding Titre}" Foreground="#E6EDF7" FontSize="14" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                          <TextBlock Text="{Binding Detail}" Foreground="#8E9CB7" FontSize="12.5" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                          <TextBlock Text="{Binding Chemin}" Visibility="{Binding CheminVis}" Foreground="#56678A" FontFamily="Consolas" FontSize="11.5" Margin="0,6,0,0" TextTrimming="CharacterEllipsis"/>
+                        </StackPanel>
+                        <Border Grid.Column="1" VerticalAlignment="Top" Background="{Binding FondPill}" CornerRadius="8" Padding="10,3" Margin="14,0,0,0">
+                          <TextBlock Text="{Binding NiveauTexte}" Foreground="{Binding Couleur}" FontSize="11" FontWeight="Bold"/>
+                        </Border>
+                      </Grid>
+                    </Grid>
+                  </Border>
+                  <DataTemplate.Triggers>
+                    <Trigger SourceName="Carte" Property="IsMouseOver" Value="True">
+                      <Setter TargetName="Carte" Property="Background" Value="#142037"/>
+                      <Setter TargetName="Carte" Property="BorderBrush" Value="#2A3A5C"/>
+                    </Trigger>
+                  </DataTemplate.Triggers>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </ScrollViewer>
+
+          <!-- Pied -->
+          <DockPanel Grid.Row="4" Margin="0,14,0,0">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+              <Button x:Name="BtnCopier" Style="{StaticResource Btn}" Content="Copier le rapport"/>
+              <Button x:Name="BtnOuvrir" Style="{StaticResource Btn}" Content="Ouvrir le rapport"/>
+              <Button x:Name="BtnRelancer" Style="{StaticResource BtnPrimaire}" Content="Relancer le scan"/>
+            </StackPanel>
+            <StackPanel VerticalAlignment="Center">
+              <TextBlock Text="Double-clic sur une carte : ouvrir l'emplacement  ·  clic droit : copier" FontSize="11.5" Foreground="#56678A"/>
+              <TextBlock x:Name="InfoRapport" FontSize="11.5" Foreground="#6F7E9A" Margin="0,3,0,0" TextTrimming="CharacterEllipsis"/>
+            </StackPanel>
+          </DockPanel>
+        </Grid>
+      </Grid>
+    </Grid>
+  </Border>
+</Window>
+'@
+
 function New-Interface {
-    Add-Type -AssemblyName System.Windows.Forms
-    Add-Type -AssemblyName System.Drawing
-    [Windows.Forms.Application]::EnableVisualStyles()
+    Add-Type -AssemblyName PresentationFramework
+    Add-Type -AssemblyName PresentationCore
+    Add-Type -AssemblyName WindowsBase
 
-    $script:Couleurs = @{
-        Fond    = [Drawing.Color]::FromArgb(11, 16, 26)
-        Panneau = [Drawing.Color]::FromArgb(17, 24, 38)
-        Carte   = [Drawing.Color]::FromArgb(23, 32, 50)
-        Actif   = [Drawing.Color]::FromArgb(31, 44, 68)
-        Survol  = [Drawing.Color]::FromArgb(27, 38, 59)
-        Bord    = [Drawing.Color]::FromArgb(45, 59, 86)
-        Entete  = [Drawing.Color]::FromArgb(19, 27, 42)
-        Texte   = [Drawing.Color]::FromArgb(228, 236, 247)
-        Gris    = [Drawing.Color]::FromArgb(134, 150, 176)
-        ACCENT  = [Drawing.Color]::FromArgb(116, 196, 255)
-        ROUGE   = [Drawing.Color]::FromArgb(255, 99, 99)
-        ORANGE  = [Drawing.Color]::FromArgb(255, 188, 84)
-        OK      = [Drawing.Color]::FromArgb(98, 216, 146)
-        INFO    = [Drawing.Color]::FromArgb(172, 184, 206)
+    $script:Pinceaux = @{
+        ROUGE  = @{ C = (New-Pinceau '#FF5C6C'); F = (New-Pinceau '#2EFF5C6C') }
+        ORANGE = @{ C = (New-Pinceau '#FFB547'); F = (New-Pinceau '#2EFFB547') }
+        OK     = @{ C = (New-Pinceau '#4FD69C'); F = (New-Pinceau '#294FD69C') }
+        INFO   = @{ C = (New-Pinceau '#8FA3C4'); F = (New-Pinceau '#1F8FA3C4') }
+        ACCENT = @{ C = (New-Pinceau '#6EC1FF'); F = (New-Pinceau '#296EC1FF') }
     }
-    $K = $script:Couleurs
-    $script:PoliceEntete = New-Object Drawing.Font('Segoe UI Semibold', 9)
-    $script:PinceauEntete = New-Object Drawing.SolidBrush($K.Entete)
-    $script:PinceauLigne = New-Object Drawing.SolidBrush($K.Bord)
 
-    $f = New-Object Windows.Forms.Form
-    $f.Text = "SnowFall SS v$SS_Version"
-    $f.Size = New-Object Drawing.Size(1240, 800)
-    $f.MinimumSize = New-Object Drawing.Size(960, 600)
-    $f.StartPosition = 'CenterScreen'
-    $f.BackColor = $K.Fond
-    $f.ForeColor = $K.Texte
-    $f.Font = New-Object Drawing.Font('Segoe UI', 10)
-    $f.KeyPreview = $true
+    $w = [Windows.Markup.XamlReader]::Parse($SS_Xaml)
+    $ui = @{ Fenetre = $w }
+    foreach ($nom in 'Racine', 'BarreTitre', 'SousTitre', 'InfoPc', 'BadgeAdmin', 'IconeAdmin', 'TexteAdmin', 'BtnMin', 'BtnFermer',
+                     'Nav', 'Rond', 'IconeVerdict', 'Verdict', 'SousVerdict', 'BarreFond', 'Barre', 'Statut',
+                     'StatRouge', 'StatOrange', 'StatMods', 'StatUsb', 'StatUsbSous', 'TitreListe', 'CompteListe',
+                     'Defile', 'Liste', 'BtnCopier', 'BtnOuvrir', 'BtnRelancer', 'InfoRapport') {
+        $ui[$nom] = $w.FindName($nom)
+    }
+    $ui.Actions = @($ui.BtnCopier, $ui.BtnOuvrir, $ui.BtnRelancer)
 
-    # --- En-tete ---
-    $entete = New-Object Windows.Forms.Panel
-    $entete.Dock = 'Top'; $entete.Height = 84; $entete.BackColor = $K.Panneau
-    $logo = New-Object Windows.Forms.Label
-    $logo.Text = '❄'; $logo.Font = New-Object Drawing.Font('Segoe UI Symbol', 28); $logo.ForeColor = $K.ACCENT
-    $logo.AutoSize = $true; $logo.Location = New-Object Drawing.Point(18, 12)
-    $titre = New-Object Windows.Forms.Label
-    $titre.Text = 'SnowFall SS'; $titre.Font = New-Object Drawing.Font('Segoe UI Semibold', 20); $titre.ForeColor = $K.Texte
-    $titre.AutoSize = $true; $titre.Location = New-Object Drawing.Point(74, 10)
-    $sous = New-Object Windows.Forms.Label
-    $sous.Text = "Outil de screenshare du staff SnowFall  ·  lecture seule  ·  v$SS_Version"
-    $sous.ForeColor = $K.Gris; $sous.AutoSize = $true; $sous.Location = New-Object Drawing.Point(78, 50)
-    $infos = New-Object Windows.Forms.Label
-    $infos.Dock = 'Right'; $infos.Width = 420; $infos.TextAlign = 'MiddleRight'; $infos.Padding = New-Object Windows.Forms.Padding(0, 0, 22, 0)
-    if ($script:SS_Admin) { $adm = 'Administrateur : oui' ; $infos.ForeColor = $K.OK }
-    else { $adm = 'Administrateur : NON (scan incomplet)'; $infos.ForeColor = $K.ORANGE }
-    $infos.Text = "$env:COMPUTERNAME  ·  $env:USERNAME`n$adm"
-    $entete.Controls.AddRange(@($infos, $logo, $titre, $sous))
-    $ligneEntete = New-Object Windows.Forms.Panel
-    $ligneEntete.Dock = 'Top'; $ligneEntete.Height = 1; $ligneEntete.BackColor = $K.Bord
+    $ui.SousTitre.Text = "Outil de screenshare du staff  ·  v$SS_Version"
+    $ui.InfoPc.Text = "$env:COMPUTERNAME  ·  $env:USERNAME"
+    if ($script:SS_Admin) {
+        $p = $script:Pinceaux.OK
+        $ui.TexteAdmin.Text = 'Administrateur'
+    } else {
+        $p = $script:Pinceaux.ORANGE
+        $ui.TexteAdmin.Text = 'Pas administrateur : scan incomplet'
+    }
+    $ui.BadgeAdmin.Background = $p.F
+    $ui.TexteAdmin.Foreground = $p.C
+    $ui.IconeAdmin.Foreground = $p.C
 
-    # --- Pied ---
-    $pied = New-Object Windows.Forms.Panel
-    $pied.Dock = 'Bottom'; $pied.Height = 62; $pied.BackColor = $K.Panneau
-    $pied.Padding = New-Object Windows.Forms.Padding(18, 14, 18, 14)
-    $barre = New-Object Windows.Forms.ProgressBar
-    $barre.Width = 260; $barre.Height = 10; $barre.Location = New-Object Drawing.Point(20, 18); $barre.Style = 'Continuous'
-    $statut = New-Object Windows.Forms.Label
-    $statut.AutoSize = $true; $statut.ForeColor = $K.Gris; $statut.Location = New-Object Drawing.Point(18, 34)
-    $statut.Text = 'Préparation...'
-    $actions = New-Object Windows.Forms.FlowLayoutPanel
-    $actions.Dock = 'Right'; $actions.AutoSize = $true; $actions.FlowDirection = 'RightToLeft'; $actions.WrapContents = $false
-    $actions.BackColor = $K.Panneau
-    $bRelancer = New-Bouton 'Relancer le scan' $true
-    $bOuvrir = New-Bouton 'Ouvrir le rapport'
-    $bCopier = New-Bouton 'Copier le rapport'
-    $actions.Controls.AddRange(@($bRelancer, $bOuvrir, $bCopier))
-    $pied.Controls.AddRange(@($actions, $barre, $statut))
-    $lignePied = New-Object Windows.Forms.Panel
-    $lignePied.Dock = 'Bottom'; $lignePied.Height = 1; $lignePied.BackColor = $K.Bord
-
-    # --- Navigation ---
-    $nav = New-Object Windows.Forms.Panel
-    $nav.Dock = 'Left'; $nav.Width = 236; $nav.BackColor = $K.Panneau
-    $nav.Padding = New-Object Windows.Forms.Padding(10, 12, 10, 12)
-    $boutons = @{}
-    $cles = @($SS_Categories.Keys)
-    [array]::Reverse($cles)
-    foreach ($cle in $cles) {
-        $b = New-Object Windows.Forms.Button
-        $b.Dock = 'Top'; $b.Height = 44
-        $b.FlatStyle = 'Flat'; $b.FlatAppearance.BorderSize = 0
-        $b.FlatAppearance.MouseOverBackColor = $K.Survol
-        $b.FlatAppearance.MouseDownBackColor = $K.Actif
-        $b.BackColor = $K.Panneau; $b.ForeColor = $K.Texte
-        $b.TextAlign = 'MiddleLeft'; $b.Cursor = 'Hand'
-        $b.Text = '     ' + $SS_Categories[$cle]
-        $b.Tag = $cle
-        $b.Add_Click({ Show-Categorie $this.Tag })
-        if ($cle -eq 'Resume') {
-            $sep = New-Object Windows.Forms.Panel
-            $sep.Dock = 'Top'; $sep.Height = 10
-            $nav.Controls.Add($sep)
+    # Navigation
+    $panneauNav = $ui.Nav
+    $ui.Nav = @{}
+    $police = New-Object System.Windows.Media.FontFamily('Segoe Fluent Icons, Segoe MDL2 Assets')
+    foreach ($cle in $SS_Categories.Keys) {
+        $rb = New-Object System.Windows.Controls.RadioButton
+        $rb.Style = $w.FindResource('Nav')
+        $rb.Tag = $cle
+        $g = New-Object System.Windows.Controls.Grid
+        foreach ($largeur in 'Auto', '*', 'Auto') {
+            $cd = New-Object System.Windows.Controls.ColumnDefinition
+            $cd.Width = (New-Object System.Windows.GridLengthConverter).ConvertFromString($largeur)
+            $g.ColumnDefinitions.Add($cd)
         }
-        $nav.Controls.Add($b)
-        $boutons[$cle] = $b
+        $ic = New-Object System.Windows.Controls.TextBlock
+        $ic.Text = [string][char]$SS_Icones[$cle]
+        $ic.FontFamily = $police
+        $ic.FontSize = 15
+        $ic.VerticalAlignment = 'Center'
+        $lb = New-Object System.Windows.Controls.TextBlock
+        $lb.Text = $SS_Categories[$cle]
+        $lb.FontSize = 13.5
+        $lb.Margin = '12,0,0,0'
+        $lb.VerticalAlignment = 'Center'
+        [System.Windows.Controls.Grid]::SetColumn($lb, 1)
+        $pas = New-Object System.Windows.Controls.Border
+        $pas.CornerRadius = 8
+        $pas.Padding = '8,1'
+        $pas.Visibility = 'Collapsed'
+        $pas.VerticalAlignment = 'Center'
+        $cp = New-Object System.Windows.Controls.TextBlock
+        $cp.FontSize = 11.5
+        $cp.FontWeight = 'Bold'
+        $pas.Child = $cp
+        [System.Windows.Controls.Grid]::SetColumn($pas, 2)
+        [void]$g.Children.Add($ic); [void]$g.Children.Add($lb); [void]$g.Children.Add($pas)
+        $rb.Content = $g
+        $rb.Add_Checked({ param($s, $e) if (-not $script:ChangeNav) { Show-Categorie $s.Tag } })
+        [void]$panneauNav.Children.Add($rb)
+        if ($cle -eq 'Resume') {
+            $sep = New-Object System.Windows.Controls.Border
+            $sep.Height = 1; $sep.Background = (New-Pinceau '#1C2740'); $sep.Margin = '10,6,10,10'
+            [void]$panneauNav.Children.Add($sep)
+        }
+        $ui.Nav[$cle] = @{ Bouton = $rb; Pastille = $pas; Compte = $cp }
     }
-    $lblNav = New-Object Windows.Forms.Label
-    $lblNav.Text = 'CATÉGORIES'; $lblNav.Dock = 'Top'; $lblNav.Height = 28; $lblNav.ForeColor = $K.Gris
-    $lblNav.Font = New-Object Drawing.Font('Segoe UI Semibold', 8.5); $lblNav.Padding = New-Object Windows.Forms.Padding(14, 0, 0, 0)
-    $nav.Controls.Add($lblNav)
-    $ligneNav = New-Object Windows.Forms.Panel
-    $ligneNav.Dock = 'Left'; $ligneNav.Width = 1; $ligneNav.BackColor = $K.Bord
+    # $ui.Nav est maintenant la table ; on garde le panneau a part
+    $script:UI = $ui
 
-    # --- Zone principale ---
-    $main = New-Object Windows.Forms.Panel
-    $main.Dock = 'Fill'; $main.Padding = New-Object Windows.Forms.Padding(20, 18, 20, 16); $main.BackColor = $K.Fond
-
-    $carteVerdict = New-Object Windows.Forms.Panel
-    $carteVerdict.Dock = 'Top'; $carteVerdict.Height = 76; $carteVerdict.BackColor = $K.Carte
-    $bande = New-Object Windows.Forms.Panel
-    $bande.Dock = 'Left'; $bande.Width = 6; $bande.BackColor = $K.ACCENT
-    $lblV1 = New-Object Windows.Forms.Label
-    $lblV1.Text = 'VERDICT'; $lblV1.ForeColor = $K.Gris; $lblV1.Font = New-Object Drawing.Font('Segoe UI Semibold', 8.5)
-    $lblV1.AutoSize = $true; $lblV1.Location = New-Object Drawing.Point(24, 10)
-    $verdict = New-Object Windows.Forms.Label
-    $verdict.Text = 'Scan en cours...'; $verdict.Font = New-Object Drawing.Font('Segoe UI Semibold', 17); $verdict.ForeColor = $K.ACCENT
-    $verdict.AutoSize = $true; $verdict.Location = New-Object Drawing.Point(22, 30)
-    $carteVerdict.Controls.AddRange(@($lblV1, $verdict, $bande))
-
-    $espace1 = New-Object Windows.Forms.Panel; $espace1.Dock = 'Top'; $espace1.Height = 16
-    $titreListe = New-Object Windows.Forms.Label
-    $titreListe.Dock = 'Top'; $titreListe.Height = 30; $titreListe.Font = New-Object Drawing.Font('Segoe UI Semibold', 12)
-    $titreListe.ForeColor = $K.Texte; $titreListe.Text = 'Résumé'
-
-    $lv = New-Object Windows.Forms.ListView
-    $lv.Dock = 'Fill'; $lv.View = 'Details'; $lv.FullRowSelect = $true; $lv.HideSelection = $false; $lv.MultiSelect = $false
-    $lv.BorderStyle = 'None'; $lv.BackColor = $K.Carte; $lv.ForeColor = $K.Texte; $lv.HeaderStyle = 'Nonclickable'
-    $lv.Font = New-Object Drawing.Font('Segoe UI', 9.75)
-    [void]$lv.Columns.Add('STATUT', 120)
-    [void]$lv.Columns.Add('ÉLÉMENT', 380)
-    [void]$lv.Columns.Add('DÉTAIL', 500)
-    $il = New-Object Windows.Forms.ImageList
-    $il.ImageSize = New-Object Drawing.Size(1, 30)
-    $lv.SmallImageList = $il
-    $lv.OwnerDraw = $true
-    $lv.Add_DrawColumnHeader({
-        param($s, $e)
-        $e.Graphics.FillRectangle($script:PinceauEntete, $e.Bounds)
-        $e.Graphics.FillRectangle($script:PinceauLigne, $e.Bounds.X, ($e.Bounds.Bottom - 1), $e.Bounds.Width, 1)
-        $rect = New-Object Drawing.Rectangle(($e.Bounds.X + 10), $e.Bounds.Y, ($e.Bounds.Width - 10), $e.Bounds.Height)
-        [Windows.Forms.TextRenderer]::DrawText($e.Graphics, $e.Header.Text, $script:PoliceEntete, $rect, $script:Couleurs.Gris, [Windows.Forms.TextFormatFlags]'VerticalCenter, Left, EndEllipsis')
-    })
-    $lv.Add_DrawItem({ param($s, $e) $e.DrawDefault = $true })
-    $lv.Add_DrawSubItem({ param($s, $e) $e.DrawDefault = $true })
-    $lv.Add_Resize({ Set-Colonnes })
-    $lv.Add_SelectedIndexChanged({
-        if ($script:UI.Liste.SelectedItems.Count -eq 0) { return }
-        $r = $script:UI.Liste.SelectedItems[0].Tag
-        $t = $r.Titre + "`r`n" + $r.Detail
-        if ($r.Chemin) { $t += "`r`nEmplacement : " + $r.Chemin }
-        $script:UI.Detail.Text = $t
-    })
-    $lv.Add_DoubleClick({ Open-Emplacement })
-
-    $menu = New-Object Windows.Forms.ContextMenuStrip
-    $mCopier = $menu.Items.Add('Copier la ligne')
+    # Menu clic droit
+    $menu = New-Object System.Windows.Controls.ContextMenu
+    $mCopier = New-Object System.Windows.Controls.MenuItem
+    $mCopier.Header = 'Copier la ligne'
     $mCopier.Add_Click({
-        if ($script:UI.Liste.SelectedItems.Count -eq 0) { return }
-        $r = $script:UI.Liste.SelectedItems[0].Tag
-        [Windows.Forms.Clipboard]::SetText(('[{0}] {1} : {2} {3}' -f $r.Niveau, $r.Titre, $r.Detail, $r.Chemin).Trim())
+        $it = $script:ItemClic
+        if ($it) { [System.Windows.Clipboard]::SetText(('[{0}] {1} : {2} {3}' -f $it.Source.Niveau, $it.Source.Titre, $it.Source.Detail, $it.Source.Chemin).Trim()) }
     })
-    $mOuvrir = $menu.Items.Add('Ouvrir l''emplacement')
-    $mOuvrir.Add_Click({ Open-Emplacement })
-    $lv.ContextMenuStrip = $menu
+    $mOuvrir = New-Object System.Windows.Controls.MenuItem
+    $mOuvrir.Header = 'Ouvrir l''emplacement'
+    $mOuvrir.Add_Click({ Open-Emplacement $script:ItemClic })
+    [void]$menu.Items.Add($mCopier); [void]$menu.Items.Add($mOuvrir)
+    $ui.Liste.ContextMenu = $menu
+    $ui.Liste.Add_PreviewMouseRightButtonDown({ param($s, $e) $script:ItemClic = Get-ItemSous $e.OriginalSource })
+    $ui.Liste.Add_PreviewMouseLeftButtonDown({
+        param($s, $e)
+        if ($e.ClickCount -eq 2) { Open-Emplacement (Get-ItemSous $e.OriginalSource) }
+    })
 
-    $espace2 = New-Object Windows.Forms.Panel; $espace2.Dock = 'Bottom'; $espace2.Height = 12
-    $detail = New-Object Windows.Forms.TextBox
-    $detail.Dock = 'Bottom'; $detail.Height = 92; $detail.Multiline = $true; $detail.ReadOnly = $true; $detail.ScrollBars = 'Vertical'
-    $detail.BorderStyle = 'None'; $detail.BackColor = $K.Carte; $detail.ForeColor = $K.Texte
-    $detail.Font = New-Object Drawing.Font('Consolas', 9.75)
-    $cadreDetail = New-Object Windows.Forms.Panel
-    $cadreDetail.Dock = 'Bottom'; $cadreDetail.Height = 108; $cadreDetail.BackColor = $K.Carte
-    $cadreDetail.Padding = New-Object Windows.Forms.Padding(12, 8, 12, 8)
-    $detail.Dock = 'Fill'
-    $cadreDetail.Controls.Add($detail)
-
-    $main.Controls.Add($lv)
-    $main.Controls.Add($espace2)
-    $main.Controls.Add($cadreDetail)
-    $main.Controls.Add($titreListe)
-    $main.Controls.Add($espace1)
-    $main.Controls.Add($carteVerdict)
-
-    $f.Controls.Add($main)
-    $f.Controls.Add($ligneNav)
-    $f.Controls.Add($nav)
-    $f.Controls.Add($lignePied)
-    $f.Controls.Add($pied)
-    $f.Controls.Add($ligneEntete)
-    $f.Controls.Add($entete)
-    $main.BringToFront()
-
-    $script:UI = @{
-        Form = $f; Liste = $lv; Detail = $detail; Barre = $barre; Statut = $statut
-        Verdict = $verdict; Bande = $bande; TitreListe = $titreListe
-        Boutons = $boutons; Actions = @($bRelancer, $bOuvrir, $bCopier)
-    }
-
-    $bRelancer.Add_Click({ Start-Scan })
-    $bOuvrir.Add_Click({ if ($script:SS_Fichier -and (Test-Path -LiteralPath $script:SS_Fichier)) { Start-Process notepad.exe -ArgumentList ('"' + $script:SS_Fichier + '"') } })
-    $bCopier.Add_Click({
-        [Windows.Forms.Clipboard]::SetText((Get-TexteRapport))
+    # Fenetre
+    $ui.BarreTitre.Add_MouseLeftButtonDown({ param($s, $e) if ($e.ButtonState -eq 'Pressed') { try { $script:UI.Fenetre.DragMove() } catch { } } })
+    $ui.BtnMin.Add_Click({ $script:UI.Fenetre.WindowState = 'Minimized' })
+    $ui.BtnFermer.Add_Click({ $script:UI.Fenetre.Close() })
+    $ui.BtnRelancer.Add_Click({ Start-Scan })
+    $ui.BtnOuvrir.Add_Click({ if ($script:SS_Fichier -and (Test-Path -LiteralPath $script:SS_Fichier)) { Start-Process notepad.exe -ArgumentList ('"' + $script:SS_Fichier + '"') } })
+    $ui.BtnCopier.Add_Click({
+        [System.Windows.Clipboard]::SetText((Get-TexteRapport))
         $script:UI.Statut.Text = 'Rapport copié dans le presse-papiers'
     })
-    $f.Add_FormClosing({ $script:Annule = $true })
-    $f.Add_Shown({
-        $script:UI.Form.Activate()
-        Set-Colonnes
+    $w.Add_Closing({ $script:Annule = $true })
+    $w.Add_ContentRendered({
+        $script:UI.Fenetre.Topmost = $true
+        $script:UI.Fenetre.Activate()
+        $script:UI.Fenetre.Topmost = $false
         Start-Scan
         if ($env:SNOWSS_CAPTURE) {
-            Show-Categorie $env:SNOWSS_CAPTURE_CAT
-            [Windows.Forms.Application]::DoEvents()
-            $bmp = New-Object Drawing.Bitmap($script:UI.Form.Width, $script:UI.Form.Height)
-            $script:UI.Form.DrawToBitmap($bmp, (New-Object Drawing.Rectangle(0, 0, $bmp.Width, $bmp.Height)))
-            $bmp.Save($env:SNOWSS_CAPTURE)
-            $bmp.Dispose()
-            $script:UI.Form.Close()
+            try {
+                if ($env:SNOWSS_CAPTURE_CAT) { Show-Categorie $env:SNOWSS_CAPTURE_CAT }
+                Invoke-PompeUi
+                $el = $script:UI.Fenetre.Content
+                $rtb = New-Object System.Windows.Media.Imaging.RenderTargetBitmap(([int]$el.ActualWidth + 28), ([int]$el.ActualHeight + 28), 96, 96, [System.Windows.Media.PixelFormats]::Pbgra32)
+                $rtb.Render($el)
+                $enc = New-Object System.Windows.Media.Imaging.PngBitmapEncoder
+                $enc.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($rtb))
+                $fs = [IO.File]::Create($env:SNOWSS_CAPTURE)
+                $enc.Save($fs)
+                $fs.Close()
+            } catch { [IO.File]::WriteAllText($env:SNOWSS_CAPTURE + '.err', ($_ | Out-String)) }
+            $script:UI.Fenetre.Close()
         }
     })
+
+    Update-Verdict
     Update-Navigation
 }
 
@@ -1070,7 +1340,6 @@ if ($modeConsole) {
     if (-not $env:SNOWSS_NOPAUSE) { try { [void](Read-Host '  Appuie sur Entrée pour fermer') } catch { } }
 } else {
     Write-Host '  SnowFall SS : la fenêtre du scan est ouverte.' -ForegroundColor Cyan
-    [void]$script:UI.Form.ShowDialog()
-    $script:UI.Form.Dispose()
+    [void]$script:UI.Fenetre.ShowDialog()
     $script:UI = $null
 }
