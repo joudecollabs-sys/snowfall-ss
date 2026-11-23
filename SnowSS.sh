@@ -11,7 +11,8 @@
 #    - USB : appareils branches (souris, claviers, cartes Arduino...),
 #      cles montees (contenu fouille), branchements/debranchements recents
 #    - fichiers recents, corbeille, fichiers ouverts depuis une cle
-#    - rapport .txt enregistre dans le dossier personnel
+#    - rapport .txt + INTERFACE (tableau de bord) ouverte a la fin du scan
+#      dans une fenetre du navigateur, fichier .html dans le dossier perso
 #
 #  CE QU'IL NE FAIT PAS :
 #    - il ne modifie, ne supprime et ne lance AUCUN fichier
@@ -24,10 +25,10 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 exec python3 - "$@" <<'SNOWSS_FIN_PYTHON'
-import os, sys, re, io, json, glob, time, zipfile, hashlib, datetime, subprocess, pwd, platform, socket
+import os, sys, re, io, json, glob, time, zipfile, hashlib, datetime, subprocess, pwd, platform, socket, shutil
 import urllib.request, urllib.parse
 
-VERSION = '1.0'
+VERSION = '1.1'
 HEURES = 48
 SEUIL_MODRINTH = 2000
 MIN_AVANT_SCAN = 30
@@ -693,13 +694,182 @@ for cle, nom in CATS:
     for r in lignes:
         rapport.append('[%s] %s : %s' % (r[1], r[2], r[3]))
         if r[4] and r[4] not in r[3]: rapport.append('        -> ' + r[4])
-fichier = os.path.join(HOME, 'SnowSS_%s.txt' % datetime.datetime.now().strftime('%Y-%m-%d_%H-%M'))
+HORO = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M')
+def donner_au_joueur(f):
+    if ROOT and os.environ.get('SUDO_USER'):
+        try: p = pwd.getpwnam(UTILISATEUR); os.chown(f, p.pw_uid, p.pw_gid)
+        except Exception: pass
+fichier = os.path.join(HOME, 'SnowSS_%s.txt' % HORO)
 try:
     with open(fichier, 'w', encoding='utf-8') as fh: fh.write('\n'.join(rapport) + '\n')
-    if ROOT and os.environ.get('SUDO_USER'):
-        try: p = pwd.getpwnam(UTILISATEUR); os.chown(fichier, p.pw_uid, p.pw_gid)
-        except Exception: pass
-    print('  ' + C['T'] + 'Rapport enregistré : ' + fichier + C['R'] + '\n')
+    donner_au_joueur(fichier)
+    print('  ' + C['T'] + 'Rapport enregistré : ' + fichier + C['R'])
 except Exception as e:
-    print('  Rapport non enregistré : %s\n' % e)
+    print('  Rapport non enregistré : %s' % e)
+
+# ---------------- interface : tableau de bord ----------------
+HTML_MODELE = r'''<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SnowFall SS</title>
+<style>
+:root{--bg:#0a0f1c;--pan:#0f172a;--pan2:#141e35;--line:#22304f;--txt:#e7eef9;--mut:#8796b4;--acc:#5cc8ff;--r:#ff5468;--o:#ffb03a;--ok:#33d69f;--i:#7f8fb3}
+*{box-sizing:border-box}html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--txt);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Ubuntu,Cantarell,"Noto Sans",sans-serif;display:flex;flex-direction:column}
+header{display:flex;align-items:center;gap:14px;padding:14px 20px;background:var(--pan);border-bottom:1px solid var(--line);flex-wrap:wrap}
+.logo{width:38px;height:38px;border-radius:10px;display:grid;place-items:center;font-size:21px;background:linear-gradient(135deg,#1d4ed8,#5cc8ff)}
+.tt{font-weight:700;font-size:16px}.st{color:var(--mut);font-size:12px}
+.verd{margin-left:auto;padding:9px 16px;border-radius:12px;font-weight:800;letter-spacing:.3px;border:1px solid}
+.verd small{display:block;font-weight:500;font-size:12px;letter-spacing:0;opacity:.85}
+.verd.ROUGE{color:var(--r);background:#ff546814;border-color:#ff546866}
+.verd.ORANGE{color:var(--o);background:#ffb03a14;border-color:#ffb03a66}
+.verd.OK{color:var(--ok);background:#33d69f14;border-color:#33d69f66}
+main{flex:1;display:flex;min-height:0}
+nav{width:236px;flex:none;padding:12px;background:var(--pan);border-right:1px solid var(--line);overflow:auto}
+nav button{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:9px 12px;margin-bottom:4px;border:0;border-radius:9px;background:none;color:var(--txt);font:inherit;text-align:left;cursor:pointer}
+nav button:hover{background:var(--pan2)}nav button.on{background:#5cc8ff1f;color:var(--acc);font-weight:600}
+.bd{display:flex;gap:4px}.bd b{min-width:22px;padding:1px 6px;border-radius:20px;font-size:11px;text-align:center;color:#0a0f1c}
+.bd b.r{background:var(--r)}.bd b.o{background:var(--o)}.bd b.ok{background:none;color:var(--ok)}
+section{flex:1;display:flex;flex-direction:column;min-width:0}
+.bar{display:flex;gap:8px;align-items:center;padding:12px 20px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.bar input{flex:1;min-width:180px;padding:9px 12px;border-radius:9px;border:1px solid var(--line);background:var(--pan2);color:var(--txt);font:inherit;outline:none}
+.bar input:focus{border-color:var(--acc)}
+.chip,.btn{padding:7px 12px;border-radius:20px;border:1px solid var(--line);background:var(--pan2);color:var(--mut);font:inherit;font-size:13px;cursor:pointer}
+.chip.on{color:var(--txt);border-color:var(--acc)}.btn{border-radius:9px;color:var(--txt)}.btn:hover,.chip:hover{border-color:var(--acc)}
+#liste{flex:1;overflow:auto;padding:16px 20px 30px}
+h2{font-size:15px;margin:6px 0 12px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.6px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px}
+.tile{background:var(--pan2);border:1px solid var(--line);border-radius:12px;padding:14px}
+.tile b{display:block;font-size:28px;line-height:1.1}.tile span{color:var(--mut);font-size:12px}
+.tile.r b{color:var(--r)}.tile.o b{color:var(--o)}.tile.ok b{color:var(--ok)}
+.meta{color:var(--mut);margin-bottom:18px}.meta b{color:var(--txt);font-weight:600}.meta .o{color:var(--o)}
+.it{background:var(--pan2);border:1px solid var(--line);border-left:4px solid var(--i);border-radius:10px;padding:10px 14px;margin-bottom:8px}
+.it.r{border-left-color:var(--r);background:#ff54680d}.it.o{border-left-color:var(--o)}.it.ok{border-left-color:var(--ok)}
+.hd{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}.ti{font-weight:600;word-break:break-word}
+.pl{flex:none;font-size:11px;font-weight:700;padding:1px 8px;border-radius:20px;color:#0a0f1c;background:var(--i)}
+.pl.r{background:var(--r)}.pl.o{background:var(--o)}.pl.ok{background:var(--ok)}
+.ct{flex:none;font-size:11px;color:var(--acc);border:1px solid #5cc8ff55;border-radius:20px;padding:0 7px}
+.de{color:var(--mut);margin-top:3px;word-break:break-word}
+.ch{margin-top:4px;font:12px ui-monospace,"DejaVu Sans Mono",monospace;color:var(--acc);word-break:break-all;cursor:pointer}
+.ch:hover{text-decoration:underline}
+.vide{padding:30px;text-align:center;color:var(--mut);border:1px dashed var(--line);border-radius:12px}
+footer{padding:8px 20px;color:var(--mut);font-size:12px;border-top:1px solid var(--line);background:var(--pan)}
+#toast{position:fixed;bottom:44px;left:50%;transform:translateX(-50%);background:var(--acc);color:#0a0f1c;font-weight:600;padding:8px 16px;border-radius:20px;opacity:0;transition:opacity .2s;pointer-events:none}
+@media (max-width:760px){main{flex-direction:column}nav{width:auto;display:flex;gap:4px;overflow-x:auto;border-right:0;border-bottom:1px solid var(--line)}nav button{width:auto;flex:none;margin:0}.verd{margin-left:0;width:100%}#liste,.bar{padding-left:16px;padding-right:16px}}
+@media print{nav,.bar,footer,#toast{display:none}body{background:#fff;color:#000}#liste{overflow:visible}.it,.tile{background:#fff;color:#000}.de{color:#333}}
+</style></head><body>
+<header><div class="logo">❄</div><div><div class="tt">SnowFall SS · Linux</div><div class="st" id="sous"></div></div><div class="verd" id="verd"></div></header>
+<main><nav id="nav"></nav><section>
+<div class="bar"><input id="q" placeholder="Rechercher (nom de mod, chemin, appareil...)" autocomplete="off">
+<button class="chip on" data-n="">Tout</button><button class="chip" data-n="ROUGE">Rouge</button><button class="chip" data-n="ORANGE">Orange</button><button class="chip" data-n="OK">OK</button><button class="chip" data-n="INFO">Info</button>
+<button class="btn" id="copier">Copier le rapport</button><button class="btn" id="imprimer">PDF</button></div>
+<div id="liste"></div></section></main>
+<footer id="pied"></footer><div id="toast"></div>
+<script>
+const D=__DATA__;
+const LV={ROUGE:['Rouge','r'],ORANGE:['Orange','o'],OK:['OK','ok'],INFO:['Info','i']};
+const NOMS={};for(const c of D.cats)NOMS[c[0]]=c[1];
+let cat='Resume',niv='',q='';
+const $=s=>document.querySelector(s);
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
+const compte=(c,n)=>D.res.filter(r=>(!c||r[0]===c)&&r[1]===n).length;
+function toast(t){const e=$('#toast');e.textContent=t;e.style.opacity=1;clearTimeout(toast.t);toast.t=setTimeout(()=>e.style.opacity=0,1400)}
+function copier(t,msg){const fin=()=>toast(msg);const vieux=()=>{const a=document.createElement('textarea');a.value=t;document.body.appendChild(a);a.select();try{document.execCommand('copy')}catch(e){}a.remove();fin()};
+ if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(fin,vieux);else vieux()}
+function menu(){let h='';
+ const ent=[['Resume','Résumé']].concat(D.cats.filter(c=>D.res.some(r=>r[0]===c[0])));
+ for(const [k,nm] of ent){const R=compte(k==='Resume'?null:k,'ROUGE'),O=compte(k==='Resume'?null:k,'ORANGE');
+  h+='<button class="'+(k===cat&&!q?'on':'')+'" data-c="'+k+'"><span>'+esc(nm)+'</span><span class="bd">'+(R?'<b class="r">'+R+'</b>':'')+(O?'<b class="o">'+O+'</b>':'')+(!R&&!O?'<b class="ok">✓</b>':'')+'</span></button>'}
+ $('#nav').innerHTML=h;
+ for(const b of document.querySelectorAll('#nav button'))b.onclick=()=>{cat=b.dataset.c;q='';$('#q').value='';menu();liste()}}
+function carte(r,avecCat){const l=LV[r[1]]||LV.INFO;
+ return '<div class="it '+l[1]+'"><div class="hd"><span class="pl '+l[1]+'">'+l[0]+'</span>'+(avecCat?'<span class="ct">'+esc(NOMS[r[0]]||r[0])+'</span>':'')+'<span class="ti">'+esc(r[2])+'</span></div>'
+  +(r[3]?'<div class="de">'+esc(r[3])+'</div>':'')+(r[4]&&String(r[3]).indexOf(r[4])<0?'<div class="ch" data-p="'+esc(r[4])+'" title="Cliquer pour copier le chemin">'+esc(r[4])+'</div>':'')+'</div>'}
+function liste(){const ql=q.toLowerCase();let h='';
+ const ok=r=>(!niv||r[1]===niv)&&(!ql||(r[2]+' '+r[3]+' '+r[4]).toLowerCase().indexOf(ql)>=0);
+ if(ql){const rs=D.res.filter(ok);h='<h2>Recherche : '+rs.length+' résultat(s)</h2>'+(rs.length?rs.map(r=>carte(r,true)).join(''):'<div class="vide">Aucun résultat.</div>')}
+ else if(cat==='Resume'){const R=compte(null,'ROUGE'),O=compte(null,'ORANGE'),K=compte(null,'OK');
+  h='<div class="tiles"><div class="tile r"><b>'+R+'</b><span>alerte(s) rouge</span></div><div class="tile o"><b>'+O+'</b><span>point(s) orange</span></div><div class="tile ok"><b>'+K+'</b><span>vérification(s) OK</span></div><div class="tile"><b>'+D.res.length+'</b><span>lignes au total</span></div></div>'
+   +'<div class="meta">PC <b>'+esc(D.pc)+'</b> · session <b>'+esc(D.user)+'</b> · '+(D.root?'mode root ✓':'<span class="o">lancé sans sudo : scan incomplet</span>')+' · '+esc(D.date)+'</div>';
+  const imp=D.res.filter(r=>(r[1]==='ROUGE'||r[1]==='ORANGE')&&ok(r)).sort((a,b)=>(a[1]==='ROUGE'?0:1)-(b[1]==='ROUGE'?0:1));
+  h+=imp.length?'<h2>À regarder avec le joueur</h2>'+imp.map(r=>carte(r,true)).join(''):'<div class="vide">Aucune alerte rouge ou orange'+(niv?' avec ce filtre':'')+'.</div>'}
+ else{const rs=D.res.filter(r=>r[0]===cat&&ok(r));h='<h2>'+esc(NOMS[cat]||cat)+'</h2>'+(rs.length?rs.map(r=>carte(r,false)).join(''):'<div class="vide">Rien à afficher avec ce filtre.</div>')}
+ $('#liste').innerHTML=h;$('#liste').scrollTop=0;
+ for(const e of document.querySelectorAll('.ch'))e.onclick=()=>copier(e.dataset.p,'Chemin copié')}
+const v=D.verdict;$('#verd').className='verd '+v[2];$('#verd').innerHTML='VERDICT : '+esc(v[0])+'<small>'+esc(v[1])+'</small>';
+$('#sous').textContent='v'+D.version+' · '+D.date+' · '+D.pc+' / '+D.user;
+$('#pied').textContent='Lecture seule : rien n\'a été modifié sur ce PC · rapport texte : '+D.fichier;
+document.title='SnowFall SS · '+v[0];
+for(const c of document.querySelectorAll('.chip'))c.onclick=()=>{niv=c.dataset.n;for(const x of document.querySelectorAll('.chip'))x.classList.toggle('on',x===c);liste()};
+$('#q').oninput=e=>{q=e.target.value.trim();menu();liste()};
+$('#copier').onclick=()=>copier(D.rapport,'Rapport copié');$('#imprimer').onclick=()=>window.print();
+menu();liste();
+</script></body></html>
+'''
+
+def page_html(donnees):
+    js = json.dumps(donnees, ensure_ascii=False).replace('</', '<\\/').replace('\u2028', '\\u2028').replace('\u2029', '\\u2029')
+    return HTML_MODELE.replace('__DATA__', js)
+
+def env_session():
+    """Variables d'affichage de la session graphique du joueur, pour ouvrir la fenetre en son nom."""
+    cles = ('DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS', 'XDG_SESSION_TYPE', 'XDG_CURRENT_DESKTOP', 'LANG')
+    env = {k: os.environ[k] for k in cles if os.environ.get(k)}
+    try: uid = pwd.getpwnam(UTILISATEUR).pw_uid
+    except Exception: uid = os.getuid()
+    if ROOT or not (env.get('DISPLAY') or env.get('WAYLAND_DISPLAY')):
+        meilleur = 0; trouve = {}
+        for pid in liste_pids():
+            try:
+                if os.stat('/proc/%d' % pid).st_uid != uid: continue
+            except Exception: continue
+            d = lire('/proc/%d/environ' % pid, True)
+            if not d: continue
+            e = {}
+            for x in d.split(b'\0'):
+                k, _, val = x.decode('utf-8', 'replace').partition('=')
+                if k in cles and val: e[k] = val
+            score = (2 if ('DISPLAY' in e or 'WAYLAND_DISPLAY' in e) else 0) + (1 if 'DBUS_SESSION_BUS_ADDRESS' in e else 0)
+            if score > meilleur: meilleur, trouve = score, e
+            if score == 3: break
+        env.update(trouve)
+    if 'XDG_RUNTIME_DIR' not in env and os.path.isdir('/run/user/%d' % uid): env['XDG_RUNTIME_DIR'] = '/run/user/%d' % uid
+    return env
+
+def ouvrir_interface(f):
+    if os.environ.get('SNOWSS_NOGUI'): return False
+    env = env_session()
+    if not (env.get('DISPLAY') or env.get('WAYLAND_DISPLAY')): return False
+    url = 'file://' + urllib.parse.quote(f)
+    essais = []
+    for b in ('google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser', 'brave-browser', 'brave', 'microsoft-edge', 'vivaldi'):
+        ch = shutil.which(b)
+        if ch: essais.append([ch, '--app=' + url, '--window-size=1280,820']); break
+    for b in ('xdg-open', 'gio', 'firefox'):
+        ch = shutil.which(b)
+        if ch: essais.append([ch, 'open', url] if b == 'gio' else [ch, url])
+    base = ['env', '-i', 'PATH=' + os.environ.get('PATH', '/usr/local/bin:/usr/bin:/bin'), 'HOME=' + HOME,
+            'USER=' + UTILISATEUR, 'LOGNAME=' + UTILISATEUR] + ['%s=%s' % kv for kv in env.items()]
+    pref = []
+    if ROOT and UTILISATEUR != 'root':
+        pref = ['runuser', '-u', UTILISATEUR, '--'] if shutil.which('runuser') else ['sudo', '-u', UTILISATEUR]
+    for c in essais:
+        try:
+            p = subprocess.Popen(pref + base + c, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, cwd=HOME if os.path.isdir(HOME) else '/')
+            time.sleep(2)
+            if p.poll() is None or p.returncode == 0: return True
+        except Exception:
+            pass
+    return False
+
+donnees = {'version': VERSION, 'date': datetime.datetime.now().strftime('%d/%m/%Y %H:%M'), 'pc': socket.gethostname(),
+           'user': UTILISATEUR, 'root': ROOT, 'verdict': list(verdict), 'cats': [list(c) for c in CATS],
+           'res': [list(r) for r in RES], 'rapport': '\n'.join(rapport), 'fichier': fichier}
+fhtml = os.path.join(HOME, 'SnowSS_%s.html' % HORO)
+try:
+    with open(fhtml, 'w', encoding='utf-8') as fh: fh.write(page_html(donnees))
+    donner_au_joueur(fhtml)
+    if ouvrir_interface(fhtml): print('  ' + C['T'] + 'Interface ouverte dans une fenêtre du navigateur : ' + fhtml + C['R'] + '\n')
+    else: print('  ' + C['T'] + 'Interface : ouvre ce fichier dans ton navigateur : ' + fhtml + C['R'] + '\n')
+except Exception as e:
+    print('  Interface non créée : %s\n' % e)
 SNOWSS_FIN_PYTHON
