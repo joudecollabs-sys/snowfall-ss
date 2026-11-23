@@ -1,5 +1,5 @@
 # =====================================================================
-#  SnowFall SS v3.3 - outil de screenshare du staff SnowFall
+#  SnowFall SS v3.4 - outil de screenshare du staff SnowFall
 #
 #  CE QUE FAIT CE SCRIPT (lecture seule) :
 #    - ouvre une fenetre qui affiche le resultat du scan par categorie
@@ -29,7 +29,7 @@ $SS_Heures        = 48       # fenetre "recent" en heures
 $SS_SeuilModrinth = 2000     # en dessous, le jar est fouille meme s'il est sur Modrinth
 $SS_Reseau        = $true    # $false = pas d'appel a Modrinth
 $SS_MinutesAvantScan = 30    # appareil debranche moins de X min avant le scan = alerte rouge
-$SS_Version       = '3.3'
+$SS_Version       = '3.4'
 
 $ErrorActionPreference = 'SilentlyContinue'
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
@@ -358,6 +358,11 @@ public static class SnowNatif {
         EnumWindows(cb, IntPtr.Zero);
         GC.KeepAlive(cb);
         return l;
+    }
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern uint QueryDosDevice(string nom, StringBuilder cible, int max);
+    public static string Peripherique(string lettre) {
+        var s = new StringBuilder(512);
+        return QueryDosDevice(lettre, s, 512) > 0 ? s.ToString() : null;
     }
     [DllImport("kernel32.dll")] static extern IntPtr OpenThread(uint acc, bool inh, uint id);
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
@@ -897,7 +902,7 @@ function Invoke-ScanPeripheriques {
     $anciens = @($liste | Where-Object { -not $_.Present } | Sort-Object { if ($_.Arrivee) { $_.Arrivee } else { [DateTime]::MinValue } } -Descending)
     $script:SS_NbUsbPresents = $presents.Count
     $script:SS_NbHistUsb = $anciens.Count
-    if ($liste.Count -eq 0) { Add-Res Usb INFO 'Appareils USB' 'Aucun appareil USB trouvé (ou liste illisible).'; return }
+    if ($liste.Count -eq 0) { Add-Res Usb INFO 'Appareils USB' 'Aucun appareil USB trouvé (ou liste illisible).'; Invoke-ScanTracesUsb; Invoke-ScanActiviteUsb; return }
 
     foreach ($a in ($presents + $anciens | Select-Object -First 60)) {
         $titre = '{0} : {1}' -f $a.Type, $a.Nom
@@ -929,6 +934,98 @@ function Invoke-ScanPeripheriques {
         Add-Res Usb $niv $titre $det
     }
     Invoke-ScanTracesUsb
+    Invoke-ScanActiviteUsb
+}
+
+# Ce qui a ete lance / ouvert depuis une cle USB (ou un lecteur qui n'est plus branche)
+function Invoke-ScanActiviteUsb {
+    Set-Etape 87 'Ce qui a été lancé depuis une clé USB...'
+    $fixes = @{}
+    foreach ($ld in @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3')) { $fixes[$ld.DeviceID.ToUpper()] = $true }
+    foreach ($u in $script:SS_Usb) { $fixes.Remove($u.Lettre) }   # disque USB vu comme fixe : il reste externe
+    $estExterne = { param([string]$c) $c -match '^([A-Za-z]:)\\' -and -not $fixes.ContainsKey($Matches[1].ToUpper()) }
+    $trouve = 0
+
+    # 1. Programmes qui tournent en ce moment depuis une cle
+    foreach ($pr in @(Get-CimInstance Win32_Process)) {
+        if ($pr.ExecutablePath -and (& $estExterne $pr.ExecutablePath)) {
+            $trouve++
+            Add-Res Usb ROUGE ('Programme lancé depuis une clé USB en ce moment : ' + $pr.Name) ('PID {0} · {1}' -f $pr.ProcessId, $pr.ExecutablePath) $pr.ExecutablePath
+        }
+    }
+
+    # 2. UserAssist : programmes lances par le joueur (nom en ROT13, date du dernier lancement)
+    $rot13 = { param([string]$s) -join ($s.ToCharArray() | ForEach-Object { $c = [int]$_; if ($c -ge 65 -and $c -le 90) { [char](65 + ($c - 65 + 13) % 26) } elseif ($c -ge 97 -and $c -le 122) { [char](97 + ($c - 97 + 13) % 26) } else { $_ } }) }
+    $ua = @()
+    foreach ($cle in @(Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist')) {
+        $p = Get-ItemProperty (Join-Path $cle.PSPath 'Count')
+        if (-not $p) { continue }
+        foreach ($x in $p.PSObject.Properties) {
+            if ($x.Value -isnot [byte[]] -or $x.Value.Length -lt 68) { continue }
+            $chemin = & $rot13 $x.Name
+            if (-not (& $estExterne $chemin)) { continue }
+            $quand = $null
+            try { $ft = [BitConverter]::ToInt64($x.Value, 60); if ($ft -gt 0) { $quand = [DateTime]::FromFileTime($ft) } } catch { }
+            $ua += [pscustomobject]@{ Chemin = $chemin; Quand = $quand; Nb = [BitConverter]::ToInt32($x.Value, 4) }
+        }
+    }
+    foreach ($e in ($ua | Sort-Object { if ($_.Quand) { $_.Quand } else { [DateTime]::MinValue } } -Descending | Select-Object -First 25)) {
+        $trouve++
+        $niv = 'INFO'
+        if ($e.Quand -and $e.Quand -ge $script:SS_Depuis) { $niv = 'ROUGE' }
+        elseif ($e.Quand -and $e.Quand -ge (Get-Date).AddDays(-30)) { $niv = 'ORANGE' }
+        $min = ''
+        if ($e.Quand) { $min = ' (il y a ' + (Format-Duree ((Get-Date) - $e.Quand)) + ')' }
+        Add-Res Usb $niv ('Programme lancé depuis une clé USB : ' + (Split-Path $e.Chemin -Leaf)) ('dernier lancement : {0}{1} · lancé {2} fois · {3}' -f (Format-Date $e.Quand), $min, $e.Nb, $e.Chemin) $e.Chemin
+    }
+
+    # 3. Fichiers recents de l'explorateur pointant vers une cle
+    try {
+        $sh = New-Object -ComObject WScript.Shell
+        foreach ($l in @(Get-ChildItem "$env:APPDATA\Microsoft\Windows\Recent" -Filter *.lnk -Force | Where-Object { $_.LastWriteTime -ge (Get-Date).AddDays(-30) } | Sort-Object LastWriteTime -Descending)) {
+            $cible = $sh.CreateShortcut($l.FullName).TargetPath
+            if (-not $cible -or -not (& $estExterne $cible)) { continue }
+            $trouve++
+            $niv = 'ORANGE'
+            if ($cible -match '(?i)\.(exe|jar|bat|cmd|ps1|vbs|dll|ahk)$' -or $cible -match $SS_RegexNom -or $cible -match $SS_RegexProgramme) { $niv = 'ROUGE' }
+            elseif ($l.LastWriteTime -lt $script:SS_Depuis) { $niv = 'INFO' }
+            Add-Res Usb $niv ('Ouvert depuis une clé USB : ' + (Split-Path $cible -Leaf)) ('le {0} · {1}' -f (Format-Date $l.LastWriteTime), $cible) $cible
+        }
+    } catch { }
+
+    # 4. BAM (admin) : programmes executes depuis un volume qui n'est plus branche
+    if ($script:SS_Admin) {
+        $volumes = @{}
+        foreach ($lt in [char[]](67..90)) {
+            try { $d = [SnowNatif]::Peripherique("$($lt):") } catch { Initialize-Natif; $d = [SnowNatif]::Peripherique("$($lt):") }
+            if ($d) { $volumes[$d.ToLower()] = "$($lt):" }
+        }
+        $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $cle = "HKLM:\SYSTEM\CurrentControlSet\Services\bam\State\UserSettings\$sid"
+        if (-not (Test-Path $cle)) { $cle = "HKLM:\SYSTEM\CurrentControlSet\Services\bam\UserSettings\$sid" }
+        $props = Get-ItemProperty -Path $cle
+        if ($props) {
+            foreach ($pp in $props.PSObject.Properties) {
+                if ($pp.Value -isnot [byte[]] -or $pp.Value.Length -lt 8) { continue }
+                $m = [regex]::Match($pp.Name, '^(\\Device\\HarddiskVolume\d+)(\\.*)$')
+                if (-not $m.Success) { continue }
+                $vol = $m.Groups[1].Value.ToLower()
+                $lettre = $volumes[$vol]
+                if ($lettre -and $fixes.ContainsKey($lettre)) { continue }
+                $quand = [DateTime]::FromFileTime([BitConverter]::ToInt64($pp.Value, 0))
+                if ($quand -lt $script:SS_Depuis) { continue }
+                $trouve++
+                $ou = 'un lecteur qui n''est plus branché'
+                if ($lettre) { $ou = "le lecteur externe $lettre" }
+                Add-Res Usb ROUGE ('Programme exécuté depuis ' + $ou + ' : ' + (Split-Path $m.Groups[2].Value -Leaf)) ('le {0} · {1}{2} (trace BAM)' -f (Format-Date $quand), $m.Groups[1].Value, $m.Groups[2].Value)
+            }
+        }
+    }
+    if ($trouve -eq 0) {
+        $note = ''
+        if (-not $script:SS_Admin) { $note = ' (BAM non vérifié : lance en administrateur pour la vérification complète)' }
+        Add-Res Usb OK 'Activité depuis une clé USB' ('Aucun programme ni fichier lancé depuis une clé USB.' + $note)
+    }
 }
 
 # Traces dans les journaux Windows : branchements, appareils effaces, disques/cles USB
