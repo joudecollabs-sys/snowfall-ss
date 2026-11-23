@@ -1,5 +1,5 @@
 # =====================================================================
-#  SnowFall SS v3.2 - outil de screenshare du staff SnowFall
+#  SnowFall SS v3.3 - outil de screenshare du staff SnowFall
 #
 #  CE QUE FAIT CE SCRIPT (lecture seule) :
 #    - ouvre une fenetre qui affiche le resultat du scan par categorie
@@ -28,7 +28,8 @@
 $SS_Heures        = 48       # fenetre "recent" en heures
 $SS_SeuilModrinth = 2000     # en dessous, le jar est fouille meme s'il est sur Modrinth
 $SS_Reseau        = $true    # $false = pas d'appel a Modrinth
-$SS_Version       = '3.2'
+$SS_MinutesAvantScan = 30    # appareil debranche moins de X min avant le scan = alerte rouge
+$SS_Version       = '3.3'
 
 $ErrorActionPreference = 'SilentlyContinue'
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
@@ -814,7 +815,9 @@ function Invoke-ScanUsb {
         if ($h.Branchee) { Add-Res Usb INFO ('Historique : ' + $h.Nom + ' (branchée)') $det; continue }
         if ($h.Retrait -and $h.Retrait -ge $script:SS_Depuis) {
             if ($script:SS_LancementJeu -and $h.Retrait -gt $script:SS_LancementJeu) { $det += ' · retirée PENDANT que Minecraft tournait' }
-            Add-Res Usb ORANGE ('Clé retirée récemment : ' + $h.Nom) $det
+            $min = [int]((Get-Date) - $h.Retrait).TotalMinutes
+            if ($min -le $SS_MinutesAvantScan) { Add-Res Usb ROUGE ('Clé USB retirée {0} min AVANT le scan : {1}' -f $min, $h.Nom) ('Demande au joueur de la rebrancher · ' + $det) }
+            else { Add-Res Usb ORANGE ('Clé retirée récemment : ' + $h.Nom) $det }
         } else {
             Add-Res Usb INFO ('Historique : ' + $h.Nom) $det
         }
@@ -911,12 +914,89 @@ function Invoke-ScanPeripheriques {
             $det = 'Souris de marque : macros possibles via son logiciel, demande au joueur de l''ouvrir · ' + $det
         }
         if (-not $a.Present -and $a.Retrait -and $a.Retrait -ge $script:SS_Depuis -and $a.Type -match 'Souris|Clavier|Récepteur|HID|Autre|Série') {
-            if ($niv -ne 'ROUGE') { $niv = 'ORANGE' }
-            $titre = 'Débranché récemment · ' + $titre
+            $min = [int]((Get-Date) - $a.Retrait).TotalMinutes
+            if ($min -le $SS_MinutesAvantScan) {
+                $niv = 'ROUGE'
+                $titre = ('Débranché {0} min AVANT le scan · ' -f $min) + $titre
+                $det = 'Appareil retiré juste avant le screenshare : demande au joueur de le rebrancher et de le montrer · ' + $det
+            } else {
+                if ($niv -ne 'ROUGE') { $niv = 'ORANGE' }
+                $titre = ('Débranché il y a {0} · ' -f (Format-Duree ((Get-Date) - $a.Retrait))) + $titre
+            }
             if ($script:SS_LancementJeu -and $a.Retrait -gt $script:SS_LancementJeu) { $det += ' · retiré PENDANT que Minecraft tournait' }
         }
         if (-not $a.Present -and $niv -eq 'INFO') { $titre = 'Historique · ' + $titre }
         Add-Res Usb $niv $titre $det
+    }
+    Invoke-ScanTracesUsb
+}
+
+# Traces dans les journaux Windows : branchements, appareils effaces, disques/cles USB
+function Invoke-ScanTracesUsb {
+    Set-Etape 86 'Journaux Windows (branchements USB)...'
+    $evts = @()
+    try { $evts = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Kernel-PnP/Configuration'; Id = 400, 410, 420; StartTime = $script:SS_Depuis } -ErrorAction Stop) } catch { }
+    $effaces = @{}; $branches = @{}
+    foreach ($e in $evts) {
+        $inst = "$($e.Properties[0].Value)"
+        if ($inst -notmatch '^(USB\\VID_|USBSTOR\\|HID\\VID_|SCSI\\DISK)') { continue }
+        $m = [regex]::Match($inst, 'VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})')
+        $cle = $inst
+        if ($m.Success) { $cle = ($m.Groups[1].Value + ':' + $m.Groups[2].Value).ToUpper() }
+        if ($e.Id -eq 420) {
+            if (-not $effaces.ContainsKey($cle) -or $e.TimeCreated -gt $effaces[$cle].Quand) { $effaces[$cle] = [pscustomobject]@{ Quand = $e.TimeCreated; Inst = $inst } }
+        } elseif ($inst -match '^(USB\\VID_[0-9A-Fa-f]{4}&PID_[0-9A-Fa-f]{4}\\|USBSTOR\\)') {
+            if (-not $branches.ContainsKey($cle) -or $e.TimeCreated -gt $branches[$cle].Quand) { $branches[$cle] = [pscustomobject]@{ Quand = $e.TimeCreated; Inst = $inst } }
+        }
+    }
+    foreach ($k in $effaces.Keys) {
+        $x = $effaces[$k]
+        $marque = ''
+        if ($k -match '^([0-9A-F]{4}):') { $marque = $SS_Marques[$Matches[1]]; if ($SS_Microcontroleurs[$Matches[1]]) { $marque = $SS_Microcontroleurs[$Matches[1]] } }
+        if ($marque) { $marque = " ($marque)" }
+        Add-Res Usb ROUGE ('Appareil USB effacé de l''historique Windows' + $marque) ('Supprimé le {0} : quelqu''un a nettoyé les traces de cet appareil (outil type USBDeview ?) · {1}' -f (Format-Date $x.Quand), $x.Inst)
+    }
+    # appareils connus de Windows (branches ou dans l'historique)
+    $connus = @{}
+    foreach ($d in @(Get-PnpDevice)) {
+        $m = [regex]::Match("$($d.InstanceId)", 'VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})')
+        if ($m.Success) { $connus[($m.Groups[1].Value + ':' + $m.Groups[2].Value).ToUpper()] = $true }
+        $connus["$($d.InstanceId)".ToUpper()] = $true
+    }
+    $fantomes = 0
+    foreach ($k in ($branches.Keys | Sort-Object { $branches[$_].Quand } -Descending)) {
+        if ($connus.ContainsKey($k.ToUpper()) -or $effaces.ContainsKey($k)) { continue }
+        $x = $branches[$k]
+        $fantomes++
+        $marque = ''
+        if ($k -match '^([0-9A-F]{4}):') { $marque = $SS_Marques[$Matches[1]]; if ($SS_Microcontroleurs[$Matches[1]]) { $marque = $SS_Microcontroleurs[$Matches[1]] } }
+        $nom = $marque
+        if (-not $nom) { $nom = $k }
+        Add-Res Usb ORANGE ('Appareil USB branché le {0} mais absent de l''historique : {1}' -f (Format-Date $x.Quand), $nom) ('Le journal Windows l''a vu, mais Windows ne le connaît plus (trace effacée ?) · ' + $x.Inst)
+    }
+    if ($effaces.Count -eq 0 -and $fantomes -eq 0) { Add-Res Usb OK 'Journaux Windows' ("Aucun appareil USB effacé ou caché depuis $SS_Heures h.") }
+    # Disques et cles USB (journal Partition/Diagnostic, garde la trace meme si le registre est nettoye)
+    $disques = @()
+    try { $disques = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Partition/Diagnostic'; Id = 1006; StartTime = $script:SS_Depuis } -ErrorAction Stop) } catch { }
+    $vus = @{}
+    foreach ($e in $disques) {
+        $pr = @($e.Properties)
+        if ($pr.Count -lt 14 -or "$($pr[13].Value)" -ne '7') { continue }   # 7 = bus USB
+        $taille = 0
+        try { $taille = [double]$pr[12].Value } catch { }
+        $textes = @($pr | ForEach-Object { $_.Value } | Where-Object { $_ -is [string] -and $_ -match '[A-Za-z]{2}' -and $_ -notmatch '^[0-9a-fA-F\-]{30,}$' })
+        $nom = ($textes | Select-Object -First 3) -join ' '
+        if (-not $nom) { $nom = 'disque USB' }
+        $cle = "$nom|$taille"
+        if ($vus.ContainsKey($cle)) { continue }
+        $vus[$cle] = $true
+        $min = [int]((Get-Date) - $e.TimeCreated).TotalMinutes
+        $niv = 'ORANGE'
+        $titre = 'Clé / disque USB branché ou retiré le ' + (Format-Date $e.TimeCreated)
+        if ($min -le $SS_MinutesAvantScan) { $niv = 'ROUGE'; $titre = ('Clé / disque USB branché ou retiré {0} min AVANT le scan' -f $min) }
+        $det = $nom
+        if ($taille -gt 0) { $det += ' · ' + (Format-Taille $taille) }
+        Add-Res Usb $niv $titre ($det + ' · trace du journal Windows (Partition/Diagnostic)')
     }
 }
 
