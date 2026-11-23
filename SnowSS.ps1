@@ -1,5 +1,5 @@
 # =====================================================================
-#  SnowFall SS v3.0 - outil de screenshare du staff SnowFall
+#  SnowFall SS v3.1 - outil de screenshare du staff SnowFall
 #
 #  CE QUE FAIT CE SCRIPT (lecture seule) :
 #    - ouvre une fenetre qui affiche le resultat du scan par categorie
@@ -26,7 +26,7 @@
 $SS_Heures        = 48       # fenetre "recent" en heures
 $SS_SeuilModrinth = 2000     # en dessous, le jar est fouille meme s'il est sur Modrinth
 $SS_Reseau        = $true    # $false = pas d'appel a Modrinth
-$SS_Version       = '3.0'
+$SS_Version       = '3.1'
 
 $ErrorActionPreference = 'SilentlyContinue'
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
@@ -52,7 +52,7 @@ $SS_Categories = [ordered]@{
     Minecraft  = 'Minecraft'
     Mods       = 'Mods'
     Programmes = 'Programmes'
-    Usb        = 'Clés USB'
+    Usb        = 'USB'
     Fichiers   = 'Fichiers récents'
     Corbeille  = 'Corbeille'
 }
@@ -570,8 +570,7 @@ function Invoke-ScanUsb {
         $parent = (Get-PnpDeviceProperty -InstanceId $dv.InstanceId -KeyName 'DEVPKEY_Device_Parent').Data
         if ("$parent" -like 'USB\*') { $devs += $dv }
     }
-    $script:SS_NbHistUsb = $devs.Count
-    if ($devs.Count -eq 0) { Add-Res Usb OK 'Historique des clés USB' 'Aucune clé USB n''a été branchée sur ce PC (selon Windows).'; return }
+    if ($devs.Count -eq 0) { Add-Res Usb OK 'Historique des clés de stockage' 'Aucune clé USB de stockage n''a été branchée sur ce PC (selon Windows).'; return }
     $hist = @()
     foreach ($dv in $devs) {
         $pr = @(Get-PnpDeviceProperty -InstanceId $dv.InstanceId -KeyName 'DEVPKEY_Device_LastArrivalDate', 'DEVPKEY_Device_LastRemovalDate', 'DEVPKEY_Device_FirstInstallDate')
@@ -592,6 +591,105 @@ function Invoke-ScanUsb {
         } else {
             Add-Res Usb INFO ('Historique : ' + $h.Nom) $det
         }
+    }
+}
+
+# Marques connues (VID USB)
+$SS_Marques = @{
+    '046D' = 'Logitech'; '1532' = 'Razer'; '1038' = 'SteelSeries'; '1B1C' = 'Corsair'; '0951' = 'HyperX / Kingston'
+    '03F0' = 'HP / HyperX'; '3151' = 'MonsGeek / Akko'; '258A' = 'SinoWealth (générique)'; '09DA' = 'A4Tech / Bloody'
+    '1E7D' = 'Roccat'; '054C' = 'Sony'; '05AC' = 'Apple'; '045E' = 'Microsoft'; '0E8D' = 'MediaTek'; '1462' = 'MSI'
+    '05E3' = 'Genesys (hub)'; '0B05' = 'ASUS'; '2516' = 'Cooler Master'; '04D9' = 'Holtek (générique)'; '0C45' = 'Microdia'
+    '093A' = 'PixArt'; '0781' = 'SanDisk'; '090C' = 'Silicon Motion'; '13FE' = 'Phison'; '058F' = 'Alcor'; '8564' = 'Transcend'
+    '18D1' = 'Google / Android'; '04E8' = 'Samsung'; '2717' = 'Xiaomi'; '0A12' = 'Cambridge Silicon (Bluetooth)'
+    '8087' = 'Intel'; '0BDA' = 'Realtek'; '2109' = 'VIA (hub)'; '1A40' = 'Terminus (hub)'; '25A7' = 'Areson (générique)'
+    '248A' = 'Maxxter (générique)'; '1EA7' = 'SHARKOON'; '3434' = 'Keychron'; '342D' = 'Glorious'; '373B' = 'Attack Shark'
+}
+# Cartes programmables : peuvent se faire passer pour une souris ou un clavier (autoclicker materiel)
+$SS_Microcontroleurs = @{
+    '2341' = 'Arduino'; '2A03' = 'Arduino'; '1B4F' = 'SparkFun'; '16C0' = 'Teensy / V-USB'; '239A' = 'Adafruit'
+    '2E8A' = 'Raspberry Pi Pico'; '1A86' = 'CH340 (clone Arduino)'; '10C4' = 'Silicon Labs CP210x'; '0403' = 'FTDI'
+    '303A' = 'Espressif ESP32'; '0483' = 'STMicro'; '1209' = 'pid.codes (open hardware)'; '2886' = 'Seeed'; '1FC9' = 'NXP'
+}
+
+function Invoke-ScanPeripheriques {
+    Set-Etape 84 'Appareils USB (souris, claviers, récepteurs...)...'
+    $tousPnp = @(Get-PnpDevice)
+    $classes = @{}
+    foreach ($d in $tousPnp) {
+        $m = [regex]::Match("$($d.InstanceId)", 'VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})')
+        if (-not $m.Success) { continue }
+        $k = ($m.Groups[1].Value + ':' + $m.Groups[2].Value).ToUpper()
+        if (-not $classes.ContainsKey($k)) { $classes[$k] = New-Object System.Collections.Generic.List[string] }
+        if ($d.Class -and -not $classes[$k].Contains($d.Class)) { $classes[$k].Add($d.Class) }
+    }
+    $racines = @($tousPnp | Where-Object { $_.InstanceId -match '^USB\\VID_[0-9A-Fa-f]{4}&PID_[0-9A-Fa-f]{4}\\' -and $_.InstanceId -notmatch '^USB\\VID_0000' })
+    $liste = @()
+    foreach ($d in $racines) {
+        Invoke-Pompe
+        if ($d.Service -match '^(USBSTOR|UASPStor)$') { continue }   # deja dans la partie cles de stockage
+        $m = [regex]::Match($d.InstanceId, 'VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})')
+        $vid = $m.Groups[1].Value.ToUpper(); $idProd = $m.Groups[2].Value.ToUpper()
+        $pr = @(Get-PnpDeviceProperty -InstanceId $d.InstanceId -KeyName 'DEVPKEY_Device_BusReportedDeviceDesc', 'DEVPKEY_Device_LastArrivalDate', 'DEVPKEY_Device_LastRemovalDate', 'DEVPKEY_Device_FirstInstallDate')
+        $h = @{}
+        foreach ($x in $pr) { $h[$x.KeyName] = $x.Data }
+        $nom = "$($h['DEVPKEY_Device_BusReportedDeviceDesc'])".Trim()
+        if (-not $nom) { $nom = $d.FriendlyName }
+        if ($nom -match '(?i)\bhub\b|concentrateur' -or $d.FriendlyName -match '(?i)\bhub\b|concentrateur') { continue }
+        $cl = @()
+        if ($classes.ContainsKey("$vid`:$idProd")) { $cl = @($classes["$vid`:$idProd"]) }
+        $souris = $cl -contains 'Mouse'; $clavier = $cl -contains 'Keyboard'
+        if ($souris -and $clavier) {
+            if ($nom -match '(?i)receiver|récepteur|dongle|wireless|unifying|lightspeed|2\.4') { $type = 'Récepteur sans fil (souris/clavier)' }
+            elseif ($nom -match '(?i)keyboard|clavier|kbd') { $type = 'Clavier' }
+            elseif ($nom -match '(?i)mouse|souris') { $type = 'Souris' }
+            else { $type = 'Souris / clavier' }
+        } elseif ($souris) { $type = 'Souris' }
+        elseif ($clavier) { $type = 'Clavier' }
+        elseif ($cl -contains 'XnaComposite' -or $nom -match '(?i)controller|manette|gamepad|dualsense|dualshock|xbox') { $type = 'Manette' }
+        elseif ($cl -contains 'MEDIA' -or $cl -contains 'AudioEndpoint' -or $nom -match '(?i)micro|headset|casque|audio') { $type = 'Audio' }
+        elseif ($cl -contains 'WPD' -or $cl -contains 'Image' -or $nom -match '(?i)iphone|ipad|android|phone') { $type = 'Téléphone / appareil photo' }
+        elseif ($cl -contains 'Bluetooth') { $type = 'Adaptateur Bluetooth' }
+        elseif ($cl -contains 'Camera') { $type = 'Webcam' }
+        elseif ($cl -contains 'Ports') { $type = 'Port série' }
+        elseif ($cl -contains 'HIDClass') { $type = 'Périphérique HID' }
+        else { $type = 'Autre' }
+        $marque = $SS_Marques[$vid]
+        $micro = $SS_Microcontroleurs[$vid]
+        if ($micro) { $marque = $micro }
+        $liste += [pscustomobject]@{
+            Nom = $nom; Type = $type; Vid = $vid; Pid = $idProd; Marque = $marque; Micro = $micro
+            Present = ($d.Status -eq 'OK'); Hid = ($souris -or $clavier -or ($cl -contains 'HIDClass'))
+            Arrivee = $h['DEVPKEY_Device_LastArrivalDate']; Retrait = $h['DEVPKEY_Device_LastRemovalDate']; Premiere = $h['DEVPKEY_Device_FirstInstallDate']
+        }
+    }
+    $presents = @($liste | Where-Object { $_.Present } | Sort-Object Type, Nom)
+    $anciens = @($liste | Where-Object { -not $_.Present } | Sort-Object { if ($_.Arrivee) { $_.Arrivee } else { [DateTime]::MinValue } } -Descending)
+    $script:SS_NbUsbPresents = $presents.Count
+    $script:SS_NbHistUsb = $anciens.Count
+    if ($liste.Count -eq 0) { Add-Res Usb INFO 'Appareils USB' 'Aucun appareil USB trouvé (ou liste illisible).'; return }
+
+    foreach ($a in ($presents + $anciens | Select-Object -First 60)) {
+        $titre = '{0} : {1}' -f $a.Type, $a.Nom
+        if ($a.Marque) { $titre += " ($($a.Marque))" }
+        if ($a.Present) { $etat = 'branché maintenant' } else { $etat = 'débranché' }
+        $det = '{0} · VID:PID {1}:{2} · 1re fois : {3} · dernier branchement : {4} · dernier retrait : {5}' -f $etat, $a.Vid, $a.Pid, (Format-Date $a.Premiere), (Format-Date $a.Arrivee), (Format-Date $a.Retrait)
+        $niv = 'INFO'
+        if ($a.Micro) {
+            if ($a.Hid) { $niv = 'ROUGE'; $det = 'Carte programmable qui se fait passer pour une souris/un clavier : autoclicker matériel possible · ' + $det }
+            else { $niv = 'ORANGE'; $det = 'Carte programmable (Arduino ou similaire) : à faire montrer par le joueur · ' + $det }
+        } elseif ($a.Vid -eq '09DA' -and $a.Type -match 'Souris') {
+            $niv = 'ORANGE'; $det = 'Souris Bloody : macros intégrées possibles (mode Ultra Core / logiciel Bloody) · ' + $det
+        } elseif ($a.Present -and $a.Type -match 'Souris|Récepteur' -and $a.Vid -match '^(046D|1532|1038|1B1C|1E7D|2516|3434|342D)$') {
+            $det = 'Souris de marque : macros possibles via son logiciel, demande au joueur de l''ouvrir · ' + $det
+        }
+        if (-not $a.Present -and $a.Retrait -and $a.Retrait -ge $script:SS_Depuis -and $a.Type -match 'Souris|Clavier|Récepteur|HID|Autre|Série') {
+            if ($niv -ne 'ROUGE') { $niv = 'ORANGE' }
+            $titre = 'Débranché récemment · ' + $titre
+            if ($script:SS_LancementJeu -and $a.Retrait -gt $script:SS_LancementJeu) { $det += ' · retiré PENDANT que Minecraft tournait' }
+        }
+        if (-not $a.Present -and $niv -eq 'INFO') { $titre = 'Historique · ' + $titre }
+        Add-Res Usb $niv $titre $det
     }
 }
 
@@ -704,6 +802,7 @@ function Start-Scan {
     $script:SS_Resultats.Clear()
     $script:SS_NbJars = 0
     $script:SS_NbHistUsb = 0
+    $script:SS_NbUsbPresents = 0
     $script:SS_Usb = @()
     $script:SS_Depuis = (Get-Date).AddHours(-$SS_Heures)
     if ($script:UI) {
@@ -720,6 +819,7 @@ function Start-Scan {
         Invoke-ScanMods
         Invoke-ScanProgrammes
         Invoke-ScanUsb
+        Invoke-ScanPeripheriques
         Invoke-ScanFichiers
         Invoke-ScanCorbeille
     } catch {
@@ -781,8 +881,8 @@ function Update-Navigation {
     $script:UI.StatRouge.Text = [string](Get-Compte Resume ROUGE)
     $script:UI.StatOrange.Text = [string](Get-Compte Resume ORANGE)
     $script:UI.StatMods.Text = [string]$script:SS_NbJars
-    $script:UI.StatUsb.Text = [string]@($script:SS_Usb).Count
-    $script:UI.StatUsbSous.Text = ('{0} dans l''historique' -f $script:SS_NbHistUsb)
+    $script:UI.StatUsb.Text = [string]$script:SS_NbUsbPresents
+    $script:UI.StatUsbSous.Text = ('{0} stockage · {1} anciens' -f @($script:SS_Usb).Count, $script:SS_NbHistUsb)
 }
 
 function Show-Categorie {
@@ -1107,7 +1207,7 @@ $SS_Xaml = @'
               <StackPanel>
                 <StackPanel Orientation="Horizontal">
                   <Ellipse Width="8" Height="8" Fill="#4FD69C" VerticalAlignment="Center"/>
-                  <TextBlock Text="Clés USB branchées" Margin="8,0,0,0" FontSize="12.5" Foreground="#8B9AB5"/>
+                  <TextBlock Text="Appareils USB branchés" Margin="8,0,0,0" FontSize="12.5" Foreground="#8B9AB5"/>
                 </StackPanel>
                 <TextBlock x:Name="StatUsb" Text="0" FontSize="30" FontWeight="Bold" Foreground="#E6EDF7" Margin="0,6,0,0"/>
                 <TextBlock x:Name="StatUsbSous" Text="0 dans l'historique" FontSize="11.5" Foreground="#5F6E8A"/>
