@@ -1,5 +1,5 @@
 # =====================================================================
-#  SnowFall SS v3.4 - outil de screenshare du staff SnowFall
+#  SnowFall SS v3.5 - outil de screenshare du staff SnowFall
 #
 #  CE QUE FAIT CE SCRIPT (lecture seule) :
 #    - ouvre une fenetre qui affiche le resultat du scan par categorie
@@ -29,7 +29,7 @@ $SS_Heures        = 48       # fenetre "recent" en heures
 $SS_SeuilModrinth = 2000     # en dessous, le jar est fouille meme s'il est sur Modrinth
 $SS_Reseau        = $true    # $false = pas d'appel a Modrinth
 $SS_MinutesAvantScan = 30    # appareil debranche moins de X min avant le scan = alerte rouge
-$SS_Version       = '3.4'
+$SS_Version       = '3.5'
 
 $ErrorActionPreference = 'SilentlyContinue'
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
@@ -1028,6 +1028,35 @@ function Invoke-ScanActiviteUsb {
     }
 }
 
+# Bilan : tout ce qu'une cle USB a charge / injecte dans Minecraft
+function Invoke-BilanUsb {
+    Set-Etape 97 'Ce que la clé USB a fait au jeu...'
+    $fixes = @{}
+    foreach ($ld in @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3')) { $fixes[$ld.DeviceID.ToUpper()] = $true }
+    foreach ($u in $script:SS_Usb) { $fixes.Remove($u.Lettre) }
+    $estExt = {
+        param([string]$txt)
+        foreach ($m in [regex]::Matches("$txt", '(?<![A-Za-z])([A-Za-z]:)\\')) { if (-not $fixes.ContainsKey($m.Groups[1].Value.ToUpper())) { return $true } }
+        return $false
+    }
+    $n = 0
+    foreach ($r in @($script:SS_Resultats.ToArray())) {
+        if (($r.Cat -ne 'Injection' -and $r.Cat -ne 'Minecraft') -or ($r.Niveau -ne 'ROUGE' -and $r.Niveau -ne 'ORANGE')) { continue }
+        if (& $estExt ("$($r.Chemin) $($r.Detail)")) {
+            $n++
+            Add-Res Usb ROUGE ('La clé USB agit sur le jeu : ' + $r.Titre) $r.Detail $r.Chemin
+        }
+    }
+    foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='java.exe' OR Name='javaw.exe'")) {
+        $par = Get-CimInstance Win32_Process -Filter "ProcessId=$($p.ParentProcessId)"
+        if ($par -and $par.ExecutablePath -and (& $estExt $par.ExecutablePath)) {
+            $n++
+            Add-Res Usb ROUGE ('Minecraft a été lancé par un programme de la clé USB : ' + $par.Name) $par.ExecutablePath $par.ExecutablePath
+        }
+    }
+    if ($n -eq 0) { Add-Res Usb OK 'Ce que la clé USB a fait au jeu' 'Rien chargé ni injecté dans Minecraft depuis une clé USB.' }
+}
+
 # Traces dans les journaux Windows : branchements, appareils effaces, disques/cles USB
 function Invoke-ScanTracesUsb {
     Set-Etape 86 'Journaux Windows (branchements USB)...'
@@ -1228,6 +1257,7 @@ function Start-Scan {
         Invoke-ScanPeripheriques
         Invoke-ScanFichiers
         Invoke-ScanCorbeille
+        Invoke-BilanUsb
     } catch {
         if ("$_" -eq 'SCAN_ANNULE') { $script:ScanEnCours = $false; return }
         Add-Res Systeme ORANGE 'Erreur pendant le scan' $_.Exception.Message
