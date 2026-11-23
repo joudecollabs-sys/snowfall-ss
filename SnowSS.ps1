@@ -1,9 +1,11 @@
 # =====================================================================
-#  SnowFall SS v3.1 - outil de screenshare du staff SnowFall
+#  SnowFall SS v3.2 - outil de screenshare du staff SnowFall
 #
 #  CE QUE FAIT CE SCRIPT (lecture seule) :
 #    - ouvre une fenetre qui affiche le resultat du scan par categorie
-#    - Minecraft lance : version, dossier, agents Java, DLL chargees
+#    - Minecraft lance : version, dossier
+#    - injection : agents Java, DLL et threads injectes, mods supprimes apres lancement
+#    - stream-proof : fenetres cachees a la capture, overlays transparents
 #    - mods : SHA-1 de chaque jar compare a Modrinth, jars inconnus fouilles
 #    - programmes : autoclickers / injecteurs ouverts ou lances recemment
 #    - cles USB : branchees maintenant (contenu scanne) + historique Windows
@@ -26,7 +28,7 @@
 $SS_Heures        = 48       # fenetre "recent" en heures
 $SS_SeuilModrinth = 2000     # en dessous, le jar est fouille meme s'il est sur Modrinth
 $SS_Reseau        = $true    # $false = pas d'appel a Modrinth
-$SS_Version       = '3.1'
+$SS_Version       = '3.2'
 
 $ErrorActionPreference = 'SilentlyContinue'
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
@@ -50,6 +52,7 @@ $SS_Categories = [ordered]@{
     Resume     = 'Résumé'
     Systeme    = 'Système'
     Minecraft  = 'Minecraft'
+    Injection  = 'Injection / stream-proof'
     Mods       = 'Mods'
     Programmes = 'Programmes'
     Usb        = 'USB'
@@ -322,8 +325,262 @@ function Invoke-ScanSysteme {
     Add-Res Systeme INFO 'Version de l''outil' "SnowFall SS v$SS_Version"
 }
 
+$SS_CodeNatif = @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class SnowNatif {
+    delegate bool EnumProc(IntPtr h, IntPtr l);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr l);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll")] static extern bool GetWindowDisplayAffinity(IntPtr h, out uint a);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] static extern IntPtr GetWindowLongPtr(IntPtr h, int i);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
+    public class Fenetre { public long Hwnd; public uint Pid; public string Titre; public string Classe; public uint Affinite; public long ExStyle; public bool Visible; public int Largeur; public int Hauteur; }
+    public static List<Fenetre> Fenetres() {
+        var l = new List<Fenetre>();
+        EnumProc cb = (h, p) => {
+            uint pid; GetWindowThreadProcessId(h, out pid);
+            uint a = 0; GetWindowDisplayAffinity(h, out a);
+            var t = new StringBuilder(256); GetWindowText(h, t, 256);
+            var c = new StringBuilder(256); GetClassName(h, c, 256);
+            RECT r; GetWindowRect(h, out r);
+            l.Add(new Fenetre { Hwnd = h.ToInt64(), Pid = pid, Titre = t.ToString(), Classe = c.ToString(), Affinite = a,
+                                ExStyle = GetWindowLongPtr(h, -20).ToInt64(), Visible = IsWindowVisible(h), Largeur = r.R - r.L, Hauteur = r.B - r.T });
+            return true;
+        };
+        EnumWindows(cb, IntPtr.Zero);
+        GC.KeepAlive(cb);
+        return l;
+    }
+    [DllImport("kernel32.dll")] static extern IntPtr OpenThread(uint acc, bool inh, uint id);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    [DllImport("ntdll.dll")] static extern int NtQueryInformationThread(IntPtr h, int cls, out IntPtr info, int len, IntPtr ret);
+    public static long DebutThread(uint tid) {
+        IntPtr h = OpenThread(0x0040 | 0x0800, false, tid);
+        if (h == IntPtr.Zero) return -1;
+        try { IntPtr a; int s = NtQueryInformationThread(h, 9, out a, IntPtr.Size, IntPtr.Zero); return s == 0 ? a.ToInt64() : -1; }
+        finally { CloseHandle(h); }
+    }
+}
+'@
+
+function Initialize-Natif {
+    if (-not ('SnowNatif' -as [type])) { Add-Type -TypeDefinition $SS_CodeNatif -ErrorAction Stop }
+}
+
+# Ce qui a ete injecte dans le jeu (agents, options, DLL, threads)
+function Invoke-ScanInjection {
+    param($p, [string]$cmd)
+    $titreJeu = "jeu PID $($p.ProcessId)"
+    $rien = $true
+
+    # 1. Agents Java (charges au lancement)
+    foreach ($a in [regex]::Matches($cmd, '-javaagent:([^"\r\n]*?\.jar)')) {
+        $chemin = $a.Groups[1].Value
+        $fa = Get-Item -LiteralPath $chemin -Force
+        if ((Split-Path $chemin -Leaf) -eq 'theseus.jar' -and $chemin -match '\\\.tmp\w+\\theseus\.jar$' -and $fa -and $fa.Length -lt 2MB) {
+            Add-Res Injection OK 'Agent Java du Modrinth App' 'theseus.jar : agent normal du launcher Modrinth' $chemin
+            continue
+        }
+        $rien = $false
+        $niv = 'ORANGE'
+        if ($chemin -match '(?i)\\(temp|tmp|downloads|telechargements|t.l.chargements|desktop|bureau)\\' -or (Test-SurUsb $chemin)) { $niv = 'ROUGE' }
+        $det = 'Un agent Java peut modifier le jeu au lancement'
+        if ($fa) {
+            $an = Get-AnalyseJar $chemin (Split-Path $chemin -Leaf)
+            if ($an.Niveau -eq 'ROUGE') { $niv = 'ROUGE' }
+            if ($an.Raisons) { $det += ' · ' + $an.Raisons }
+        } else { $det += ' · le fichier n''existe plus (supprimé après le lancement ?)'; $niv = 'ROUGE' }
+        Add-Res Injection $niv ('Agent Java injecté au lancement : ' + (Split-Path $chemin -Leaf)) $det $chemin
+    }
+    # 2. Agents natifs et options de lancement suspectes
+    foreach ($a in [regex]::Matches($cmd, '-agent(path|lib):([^\s"]+)')) {
+        $rien = $false
+        $val = $a.Groups[2].Value
+        if ($a.Groups[1].Value -eq 'lib' -and $val -match '^jdwp') { Add-Res Injection ORANGE 'Débogueur Java activé (jdwp)' ('Permet de modifier le jeu en direct : ' + $val) }
+        else { Add-Res Injection ROUGE ('Agent natif chargé dans le jeu (-agent' + $a.Groups[1].Value + ')') ('DLL chargée par Java au démarrage : ' + $val) $val }
+    }
+    $options = @(
+        @{ R = '-Xbootclasspath/[ap]:(\S+)'; T = 'Classes ajoutées au démarrage de Java (-Xbootclasspath)' },
+        @{ R = '(?<!\S)(-noverify|-Xverify:none)'; T = 'Vérification du code Java désactivée (-noverify)' },
+        @{ R = '-Djava\.system\.class\.loader=(\S+)'; T = 'Chargeur de classes remplacé' },
+        @{ R = '(?i)-Dfabric\.addMods=(?:"([^"]+)"|(\S+))'; T = 'Mods chargés depuis un autre dossier (-Dfabric.addMods)' }
+    )
+    foreach ($o in $options) {
+        foreach ($a in [regex]::Matches($cmd, $o.R)) {
+            $rien = $false
+            Add-Res Injection ORANGE $o.T $a.Value.Trim()
+            if ($o.T -like 'Mods charg*') {
+                $extra = Get-Chemin $a.Groups
+                foreach ($x in ("$extra" -split ';')) { if ($x) { $script:SS_DossiersMods.Add([pscustomobject]@{ Chemin = $x; Jeu = $true }) } }
+            }
+        }
+    }
+
+    if (-not $p.ExecutablePath) { return }
+    $javaDir = Split-Path (Split-Path $p.ExecutablePath -Parent) -Parent
+    $gp = Get-Process -Id $p.ProcessId
+    if (-not $gp -or -not $gp.Modules) {
+        Add-Res Injection INFO 'DLL et threads du jeu' 'Liste illisible : relance le scan en administrateur.'
+        return
+    }
+    $modules = @($gp.Modules)
+
+    # 3. DLL injectees
+    Set-Etape 10 'Recherche de DLL injectées dans le jeu...'
+    $dlls = @($modules | Where-Object {
+        $_.FileName -and
+        -not $_.FileName.StartsWith($env:windir, [StringComparison]::OrdinalIgnoreCase) -and
+        -not $_.FileName.StartsWith($javaDir, [StringComparison]::OrdinalIgnoreCase) -and
+        $_.FileName -notmatch $SS_RegexDllNormale
+    })
+    foreach ($d in $dlls) {
+        $rien = $false
+        $sig = Get-AuthenticodeSignature -LiteralPath $d.FileName
+        $signe = ($sig -and $sig.Status -eq 'Valid')
+        $editeur = ''
+        if ($signe) { $editeur = ($sig.SignerCertificate.Subject -replace '^CN=("?)([^",]+).*$', '$2') }
+        $niv = 'ORANGE'
+        if (-not $signe -and $d.FileName -match '(?i)\\(temp|tmp|downloads|t.l.chargements|desktop|bureau)\\') { $niv = 'ROUGE' }
+        if (Test-SurUsb $d.FileName) { $niv = 'ROUGE' }
+        if ($signe) { $det = "signée par $editeur" } else { $det = 'NON signée' }
+        $det += (' · {0} · {1}' -f (Format-Taille (Get-Item -LiteralPath $d.FileName -Force).Length), $titreJeu)
+        Add-Res Injection $niv ('DLL injectée dans le jeu : ' + $d.ModuleName) $det $d.FileName
+    }
+    if ($dlls.Count -eq 0) { Add-Res Injection OK 'DLL chargées dans le jeu' ("{0} DLL vérifiées, aucune DLL étrangère ({1})." -f $modules.Count, $titreJeu) }
+
+    # 4. Threads qui ne demarrent dans aucun module (injection manuelle / shellcode)
+    Set-Etape 12 'Recherche de threads injectés dans le jeu...'
+    try {
+        Initialize-Natif
+        $plages = @($modules | ForEach-Object { [pscustomobject]@{ D = $_.BaseAddress.ToInt64(); F = $_.BaseAddress.ToInt64() + $_.ModuleMemorySize } })
+        $suspects = @(); $lus = 0
+        foreach ($th in @($gp.Threads)) {
+            $adr = [SnowNatif]::DebutThread([uint32]$th.Id)
+            if ($adr -le 0) { continue }
+            $lus++
+            $dedans = $false
+            foreach ($pl in $plages) { if ($adr -ge $pl.D -and $adr -lt $pl.F) { $dedans = $true; break } }
+            if (-not $dedans) { $suspects += ('thread {0} → 0x{1:X}' -f $th.Id, $adr) }
+        }
+        if ($suspects.Count -gt 0) {
+            $rien = $false
+            Add-Res Injection ROUGE ('Threads injectés dans le jeu : ' + $suspects.Count) ('Ces threads ne démarrent dans aucune DLL connue : signe d''injection manuelle (manual map / shellcode) · ' + ($suspects[0..([Math]::Min(4, $suspects.Count - 1))] -join ', ') + ' · ' + $titreJeu)
+        } elseif ($lus -gt 0) {
+            Add-Res Injection OK 'Threads du jeu' ("{0} threads vérifiés, tous démarrent dans une DLL connue ({1})." -f $lus, $titreJeu)
+        } else {
+            Add-Res Injection INFO 'Threads du jeu' 'Illisibles : relance le scan en administrateur.'
+        }
+    } catch { Add-Res Injection INFO 'Threads du jeu' ('Vérification impossible : ' + $_.Exception.Message) }
+}
+
+# Compare les mods charges par le jeu (logs\latest.log) avec ceux encore presents
+function Invoke-ScanLogJeu {
+    Set-Etape 66 'Comparaison avec le log du jeu...'
+    foreach ($j in $script:SS_Jeux) {
+        $log = Join-Path $j.Dossier 'logs\latest.log'
+        if (-not (Test-Path -LiteralPath $log)) { continue }
+        $lignes = @()
+        try {
+            $fs = New-Object IO.FileStream($log, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+            $sr = New-Object IO.StreamReader($fs)
+            $lignes = $sr.ReadToEnd() -split "`r?`n"
+            $sr.Dispose()
+        } catch { continue }
+        $charges = @()
+        $dans = $false
+        foreach ($l in $lignes) {
+            if ($l -match 'Loading \d+ mods:') { $dans = $true; $charges = @(); continue }
+            if ($dans) {
+                if ($l -match '^\t- ([A-Za-z0-9_\-\.]+) ') { $charges += $Matches[1]; continue }
+                if ($l -match '^\t\s') { continue }
+                $dans = $false
+            }
+        }
+        if ($charges.Count -eq 0) { continue }
+        $presents = @{}
+        foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $j.Dossier 'mods') -Filter *.jar -File -Force)) {
+            $id = Get-ModIdRapide $f.FullName
+            if ($id) { $presents[$id.ToLower()] = $true }
+        }
+        $integres = '^(minecraft|java|fabricloader|quilt_loader|mixinextras|fabric-api-base)$'
+        $manquants = @($charges | Where-Object { $_ -notmatch $integres -and -not $presents.ContainsKey($_.ToLower()) })
+        if ($manquants.Count -gt 0) {
+            Add-Res Injection ROUGE ('Mods chargés par le jeu mais supprimés depuis : ' + ($manquants -join ', ')) ('Le log du jeu montre ces mods au lancement, mais leur jar n''est plus dans le dossier mods (supprimé ou déplacé pendant la partie ?) · ' + $log) $log
+        } else {
+            Add-Res Injection OK 'Mods du log du jeu' ("{0} mods chargés au lancement, tous encore présents dans le dossier mods." -f $charges.Count) $log
+        }
+        $txt = $lignes -join "`n"
+        $m = [regex]::Match($txt, '(?i)\b(meteor ?client|wurst|aristois|liquidbounce|rusherhack|thunderhack|bleachhack|boze|doomsday|prestige ?client|vape|phobos|konas|earthhack|self.?destruct)\b')
+        if ($m.Success) { Add-Res Injection ORANGE ('Nom de client de triche dans le log du jeu : ' + $m.Value) $log $log }
+    }
+}
+
+function Get-ModIdRapide {
+    param([string]$Chemin)
+    try {
+        $zip = [IO.Compression.ZipFile]::OpenRead($Chemin)
+        try {
+            foreach ($nom in 'fabric.mod.json', 'quilt.mod.json') {
+                $e = $zip.GetEntry($nom)
+                if ($e) {
+                    $m = [regex]::Match((Read-Entree $e), '"id"\s*:\s*"([^"]+)"')
+                    if ($m.Success) { return $m.Groups[1].Value }
+                }
+            }
+        } finally { $zip.Dispose() }
+    } catch { }
+    return $null
+}
+
+# Fenetres cachees a la capture (stream-proof) et overlays transparents
+function Invoke-ScanStreamProof {
+    Set-Etape 74 'Fenêtres cachées au stream / screenshare...'
+    try { Initialize-Natif } catch { Add-Res Injection INFO 'Fenêtres stream-proof' ('Vérification impossible : ' + $_.Exception.Message); return }
+    $procs = @{}
+    foreach ($pr in @(Get-Process)) { $procs[[uint32]$pr.Id] = $pr }
+    $legit = '(?i)^(1password|keepass.*|bitwarden|dashlane|lastpass|nordpass|proton ?pass)$'
+    $overlayOk = '(?i)^(discord.*|nvcontainer|nvidia.*|steam.*|gameoverlayui.*|medal.*|obs.*|overwolf.*|rtss|msiafterburner|xboxgamebar|gamebar.*|explorer|textinputhost|shellexperiencehost|searchhost|startmenuexperiencehost|tiktok.*|lghub.*|razer.*|claude|code|chrome|msedge|firefox|opera.*|brave|applicationframehost|systemsettings|ctfmon|dwm|lockapp|widgets|powertoys.*|snippingtool|screenclippinghost|sharex|lively.*|wallpaper.*|rainmeter|msedgewebview2|teams|ms-teams|spotify|nahimic.*|armourycrate.*|signalrgb|icue|steelseries.*|amdrsserv|radeonsoftware|copilot|phoneexperiencehost)$'
+    $cachees = 0; $overlays = 0
+    foreach ($f in [SnowNatif]::Fenetres()) {
+        if ($f.Pid -eq $PID) { continue }
+        $pr = $procs[[uint32]$f.Pid]
+        $nomP = "PID $($f.Pid)"; $chemin = ''
+        if ($pr) { $nomP = $pr.ProcessName; $chemin = $pr.Path }
+        $titre = $f.Titre
+        if (-not $titre) { $titre = '(sans titre)' }
+        $topmost = (($f.ExStyle -band 0x8) -ne 0)
+        $transp = (($f.ExStyle -band 0x20) -ne 0) -and (($f.ExStyle -band 0x80000) -ne 0)
+        if ($f.Affinite -ne 0) {
+            if (-not $f.Visible) { continue }
+            $cachees++
+            if ($f.Affinite -eq 0x11) { $mode = 'invisible à la capture (WDA_EXCLUDEFROMCAPTURE)' } else { $mode = 'apparaît en noir à la capture (WDA_MONITOR)' }
+            $niv = 'ORANGE'
+            if ($nomP -match '(?i)^javaw?$' -or ($topmost -and $transp) -or $nomP -match $SS_RegexProgramme) { $niv = 'ROUGE' }
+            if ($nomP -match $legit) { $niv = 'INFO' }
+            Add-Res Injection $niv ('Fenêtre cachée au stream : ' + $nomP + '.exe') ("'{0}' · {1} · {2}x{3} · classe {4}. Le staff ne la voit PAS en screenshare : demande au joueur de la montrer." -f $titre, $mode, $f.Largeur, $f.Hauteur, $f.Classe) $chemin
+            continue
+        }
+        if ($f.Visible -and $topmost -and $transp -and $f.Largeur -ge 300 -and $f.Hauteur -ge 200 -and $nomP -notmatch $overlayOk) {
+            $overlays++
+            $niv = 'ORANGE'
+            if ($nomP -match '(?i)^javaw?$') { $niv = 'ROUGE' }
+            Add-Res Injection $niv ('Overlay transparent par-dessus l''écran : ' + $nomP + '.exe') ("'{0}' · {1}x{2} · classe {3}. Fenêtre invisible qui se pose sur le jeu (ESP / HUD de triche possible)." -f $titre, $f.Largeur, $f.Hauteur, $f.Classe) $chemin
+        }
+    }
+    if ($cachees -eq 0) { Add-Res Injection OK 'Fenêtres stream-proof' 'Aucune fenêtre cachée à la capture : tout ce qui est à l''écran est visible en screenshare.' }
+    if ($overlays -eq 0) { Add-Res Injection OK 'Overlays' 'Aucun overlay transparent inconnu par-dessus l''écran.' }
+}
+
 function Invoke-ScanMinecraft {
     Set-Etape 8 'Recherche de Minecraft...'
+    $script:SS_Jeux = @()
     $script:SS_DossiersMods = New-Object System.Collections.Generic.List[object]
     $script:SS_LancementJeu = $null
     $nb = 0
@@ -349,38 +606,8 @@ function Invoke-ScanMinecraft {
             $script:SS_DossiersMods.Add([pscustomobject]@{ Chemin = (Join-Path $gd 'mods'); Jeu = $true })
             $script:SS_DossiersMods.Add([pscustomobject]@{ Chemin = (Join-Path $gd 'resourcepacks'); Jeu = $true })
         }
-        foreach ($a in [regex]::Matches($cmd, '-javaagent:([^"\r\n]*?\.jar)')) {
-            $chemin = $a.Groups[1].Value
-            $fa = Get-Item -LiteralPath $chemin -Force
-            if ((Split-Path $chemin -Leaf) -eq 'theseus.jar' -and $chemin -match '\\\.tmp\w+\\theseus\.jar$' -and $fa -and $fa.Length -lt 2MB) {
-                Add-Res Minecraft OK 'Agent Java' 'theseus.jar : agent normal du Modrinth App' $chemin
-                continue
-            }
-            $niv = 'ORANGE'
-            if ($chemin -match '(?i)\\(temp|tmp|downloads|telechargements|t.l.chargements|desktop|bureau)\\' -or (Test-SurUsb $chemin)) { $niv = 'ROUGE' }
-            Add-Res Minecraft $niv 'Agent Java chargé au lancement' $chemin $chemin
-        }
-        foreach ($a in [regex]::Matches($cmd, '(?i)-Dfabric\.addMods=(?:"([^"]+)"|(\S+))')) {
-            $extra = Get-Chemin $a.Groups
-            Add-Res Minecraft ORANGE 'Mods chargés depuis un autre dossier' $extra $extra
-            foreach ($x in ($extra -split ';')) { if ($x) { $script:SS_DossiersMods.Add([pscustomobject]@{ Chemin = $x; Jeu = $true }) } }
-        }
-        if ($p.ExecutablePath) {
-            $javaDir = Split-Path (Split-Path $p.ExecutablePath -Parent) -Parent
-            $gp = Get-Process -Id $p.ProcessId
-            if ($gp -and $gp.Modules) {
-                $dlls = @($gp.Modules | Where-Object {
-                    $_.FileName -and
-                    -not $_.FileName.StartsWith($env:windir, [StringComparison]::OrdinalIgnoreCase) -and
-                    -not $_.FileName.StartsWith($javaDir, [StringComparison]::OrdinalIgnoreCase) -and
-                    $_.FileName -notmatch $SS_RegexDllNormale
-                })
-                if ($dlls.Count -eq 0) { Add-Res Minecraft OK 'DLL chargées dans le jeu' 'Rien d''anormal.' }
-                foreach ($d in $dlls) { Add-Res Minecraft ORANGE 'DLL inhabituelle dans le jeu' $d.FileName $d.FileName }
-            } else {
-                Add-Res Minecraft INFO 'DLL chargées dans le jeu' 'Liste illisible : relance en administrateur.'
-            }
-        }
+        if ($m.Success) { $script:SS_Jeux += [pscustomobject]@{ Pid = $p.ProcessId; Dossier = $gd } }
+        Invoke-ScanInjection $p $cmd
     }
     if ($nb -eq 0) { Add-Res Minecraft ORANGE 'Aucun Minecraft lancé' 'Demande au joueur de garder son jeu ouvert pendant le scan.' }
 }
@@ -817,7 +1044,9 @@ function Start-Scan {
         Invoke-ScanSysteme
         Invoke-ScanMinecraft
         Invoke-ScanMods
+        Invoke-ScanLogJeu
         Invoke-ScanProgrammes
+        Invoke-ScanStreamProof
         Invoke-ScanUsb
         Invoke-ScanPeripheriques
         Invoke-ScanFichiers
@@ -843,7 +1072,7 @@ function Start-Scan {
 #  Interface (WPF)
 # =====================================================================
 $SS_Icones = @{
-    Resume = 0xE80F; Systeme = 0xE770; Minecraft = 0xE7FC; Mods = 0xE74C
+    Resume = 0xE80F; Systeme = 0xE770; Minecraft = 0xE7FC; Injection = 0xEA18; Mods = 0xE74C
     Programmes = 0xE71D; Usb = 0xE88E; Fichiers = 0xE8A5; Corbeille = 0xE74D
 }
 
