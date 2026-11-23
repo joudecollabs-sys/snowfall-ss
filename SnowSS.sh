@@ -555,7 +555,7 @@ def scan_usb():
         except Exception:
             pass
     if not log.strip():
-        add('Usb', 'INFO', 'Journal des branchements USB', 'Illisible : relance avec sudo.'); return
+        add('Usb', 'INFO', 'Journal des branchements USB', 'Illisible : relance avec sudo.')
     ports = {}; retraits = []
     for l in log.splitlines():
         m = re.match(r'^\s*\[?([0-9.]+)\]?\s', l)
@@ -592,7 +592,7 @@ def scan_usb():
             add('Usb', 'ROUGE', 'Carte programmable débranchée récemment : ' + nom, det)
         else:
             add('Usb', 'INFO', 'Débranché récemment : %s%s' % (nom, ' (%s)' % marque if marque else ''), det)
-    if nr == 0: add('Usb', 'OK', 'Journal des branchements USB', 'Aucun appareil débranché depuis %d h.' % HEURES)
+    if nr == 0 and log.strip(): add('Usb', 'OK', 'Journal des branchements USB', 'Aucun appareil débranché depuis %d h.' % HEURES)
     # fichiers ouverts depuis une cle (GTK recently-used)
     t = lire(os.path.join(HOME, '.local/share/recently-used.xbel')) or ''
     no = 0
@@ -646,9 +646,28 @@ def scan_fichiers():
         add('Corbeille', niv, 'Supprimé récemment : ' + os.path.basename(p), 'le %s · venait de %s' % (fdate(ts), p))
     if rien: add('Corbeille', 'OK', 'Corbeille', 'Aucun jar / programme supprimé depuis %d h.' % HEURES)
 
+def bilan_usb():
+    etape('Ce que la clé USB a fait au jeu')
+    n = 0
+    ext = lambda s: bool(re.search(r'/(media|run/media|mnt)/', s or ''))
+    for r in list(RES):
+        if r[0] in ('Injection', 'Minecraft') and r[1] in ('ROUGE', 'ORANGE') and (ext(r[3]) or ext(r[4])):
+            n += 1; add('Usb', 'ROUGE', 'La clé USB agit sur le jeu : ' + r[2], r[3], r[4])
+    for pid in liste_pids():
+        e = exe(pid) or ''
+        if ext(e):
+            n += 1; add('Usb', 'ROUGE', 'Programme de la clé USB en cours : ' + (comm(pid) or '?'), 'PID %d · %s' % (pid, e), e)
+    for pid, gd, _ in JEUX:
+        m = re.search(r'PPid:\s*(\d+)', lire('/proc/%d/status' % pid) or '')
+        if m:
+            pe = exe(int(m.group(1))) or ''
+            if ext(pe):
+                n += 1; add('Usb', 'ROUGE', 'Minecraft a été lancé par un programme de la clé USB', pe, pe)
+    if n == 0: add('Usb', 'OK', 'Ce que la clé USB a fait au jeu', 'Rien chargé ni injecté dans Minecraft depuis une clé USB.')
+
 # =====================================================================
 print(C['T'] + C['B'] + '\n  ❄  SnowFall SS (Linux) v' + VERSION + C['R'] + C['G'] + '  ·  outil de screenshare du staff  ·  lecture seule' + C['R'])
-for f in (scan_systeme, scan_minecraft, scan_mods, scan_log, scan_programmes, scan_usb, scan_fichiers):
+for f in (scan_systeme, scan_minecraft, scan_mods, scan_log, scan_programmes, scan_usb, scan_fichiers, bilan_usb):
     try:
         f()
     except Exception as e:
