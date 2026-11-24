@@ -614,9 +614,192 @@ function Invoke-ScanMinecraft {
             $script:SS_DossiersMods.Add([pscustomobject]@{ Chemin = (Join-Path $gd 'resourcepacks'); Jeu = $true })
         }
         if ($m.Success) { $script:SS_Jeux += [pscustomobject]@{ Pid = $p.ProcessId; Dossier = $gd } }
+        Invoke-InfoLancement $p $cmd $(if ($m.Success) { $gd } else { '' })
         Invoke-ScanInjection $p $cmd
     }
     if ($nb -eq 0) { Add-Res Minecraft ORANGE 'Aucun Minecraft lancé' 'Demande au joueur de garder son jeu ouvert pendant le scan.' }
+    Invoke-ScanLaunchers
+}
+
+# =====================================================================
+#  Launchers et clients
+# =====================================================================
+$SS_LaunchersProc = @(
+    @('(?i)^(MinecraftLauncher|Minecraft)\.exe$|Minecraft Launcher', 'Launcher officiel Minecraft'),
+    @('(?i)lunar', 'Lunar Client'), @('(?i)feather', 'Feather Client'), @('(?i)badlion', 'Badlion Client'),
+    @('(?i)modrinth|theseus', 'Modrinth App'), @('(?i)prismlauncher', 'Prism Launcher'), @('(?i)polymc', 'PolyMC'),
+    @('(?i)multimc', 'MultiMC'), @('(?i)curseforge|overwolf', 'CurseForge'), @('(?i)atlauncher', 'ATLauncher'),
+    @('(?i)gdlauncher', 'GDLauncher'), @('(?i)tlauncher', 'TLauncher (launcher cracké)'), @('(?i)sklauncher', 'SKLauncher (launcher cracké)'),
+    @('(?i)labymod', 'LabyMod'), @('(?i)technic', 'Technic Launcher'), @('(?i)salwyrr', 'Salwyrr'), @('(?i)pvplounge', 'PvPLounge'),
+    @('(?i)legacy.?launcher', 'Legacy Launcher (launcher cracké)'), @('(?i)hmcl', 'HMCL')
+)
+
+function Get-LauncherChemin {
+    # Devine le launcher et l'instance a partir d'un chemin (dossier mods, gameDir...)
+    param([string]$Chemin)
+    $c = "$Chemin".TrimEnd('\') + '\'
+    $regles = @(
+        @('\\(?:ModrinthApp|com\.modrinth\.theseus)\\profiles\\([^\\]+)\\', 'Modrinth App'),
+        @('\\PrismLauncher\\instances\\([^\\]+)\\', 'Prism Launcher'),
+        @('\\PolyMC\\instances\\([^\\]+)\\', 'PolyMC'),
+        @('\\MultiMC\\instances\\([^\\]+)\\', 'MultiMC'),
+        @('\\curseforge\\minecraft\\Instances\\([^\\]+)\\', 'CurseForge'),
+        @('\\ATLauncher\\instances\\([^\\]+)\\', 'ATLauncher'),
+        @('\\gdlauncher[^\\]*\\(?:data\\)?instances\\([^\\]+)\\', 'GDLauncher'),
+        @('\\\.technic\\modpacks\\([^\\]+)\\', 'Technic Launcher'),
+        @('\\\.lunarclient\\profiles\\([^\\]+\\[^\\]+)\\', 'Lunar Client'),
+        @('\\\.lunarclient\\()', 'Lunar Client'),
+        @('\\\.feather\\user-mods\\([^\\]+)\\', 'Feather Client'),
+        @('\\\.feather\\()', 'Feather Client'),
+        @('\\Badlion Client\\()', 'Badlion Client'),
+        @('\\\.tlauncher\\()', 'TLauncher (launcher cracké)'),
+        @('\\labymod-neo\\()', 'LabyMod'),
+        @('\\\.minecraft\\()', 'Launcher officiel / .minecraft')
+    )
+    foreach ($r in $regles) {
+        $m = [regex]::Match($c, '(?i)' + $r[0])
+        if ($m.Success) { return [pscustomobject]@{ Nom = $r[1]; Instance = $m.Groups[1].Value.Replace('\', ' / ') } }
+    }
+    return [pscustomobject]@{ Nom = 'Autre dossier'; Instance = '' }
+}
+
+function Format-Launcher {
+    param($L)
+    if ($L.Instance) { return ('{0} · {1}' -f $L.Nom, $L.Instance) }
+    return $L.Nom
+}
+
+function Get-ClientJeu {
+    # Client / chargeur de mods d'apres la ligne de commande Java
+    param([string]$Cmd)
+    $c = @()
+    if ($Cmd -match '(?i)com\.moonsworth|\\\.lunarclient\\') { $c += 'Lunar Client' }
+    if ($Cmd -match '(?i)\\\.feather\\|net\.digitalingot') { $c += 'Feather Client' }
+    if ($Cmd -match '(?i)net\.badlion|Badlion Client') { $c += 'Badlion Client' }
+    if ($Cmd -match '(?i)net\.labymod|labymod') { $c += 'LabyMod' }
+    if ($Cmd -match '(?i)--fml\.neoForgeVersion\s+(\S+)') { $c += ('NeoForge ' + $Matches[1]) }
+    elseif ($Cmd -match '(?i)net\.neoforged') { $c += 'NeoForge' }
+    elseif ($Cmd -match '(?i)--fml\.forgeVersion\s+(\S+)') { $c += ('Forge ' + $Matches[1]) }
+    elseif ($Cmd -match '(?i)cpw\.mods|net\.minecraftforge|FMLTweaker') { $c += 'Forge' }
+    if ($Cmd -match '(?i)org\.quiltmc\.loader') { $v = ''; if ($Cmd -match '(?i)quilt-loader[-\\/](\d[\w.+-]*?)(\.jar|\\|/)') { $v = ' ' + $Matches[1] }; $c += ('Quilt' + $v) }
+    elseif ($Cmd -match '(?i)net\.fabricmc\.loader') { $v = ''; if ($Cmd -match '(?i)fabric-loader[-\\/](\d[\w.+-]*?)(\.jar|\\|/)') { $v = ' ' + $Matches[1] }; $c += ('Fabric' + $v) }
+    if ($Cmd -match '(?i)optifine') { $c += 'OptiFine' }
+    if ($c.Count -eq 0) { $c += 'Vanilla (sans chargeur de mods)' }
+    return ($c -join ' + ')
+}
+
+function Invoke-InfoLancement {
+    param($Proc, [string]$Cmd, [string]$GameDir)
+    # 1. Client / chargeur de mods
+    Add-Res Minecraft INFO ('Client : ' + (Get-ClientJeu $Cmd)) ('PID ' + $Proc.ProcessId)
+    # 2. Programme qui a lance le jeu (chaine des processus parents)
+    $tous = @{}
+    foreach ($x in @(Get-CimInstance Win32_Process)) { $tous[[int]$x.ProcessId] = $x }
+    $cur = $Proc; $chaine = @()
+    for ($i = 0; $i -lt 5; $i++) {
+        $par = $tous[[int]$cur.ParentProcessId]
+        if (-not $par -or ($par.CreationDate -and $cur.CreationDate -and $par.CreationDate -gt $cur.CreationDate)) { break }
+        $chaine += $par; $cur = $par
+    }
+    $launcher = $null; $lanceur = $null
+    foreach ($par in $chaine) {
+        if ($par.Name -match '(?i)^(java|javaw)\.exe$' -and "$($par.CommandLine)" -match $SS_RegexJeu -and "$($par.CommandLine)" -notmatch '(?i)-jar\s') { continue }
+        foreach ($l in $SS_LaunchersProc) { if ("$($par.Name) $($par.CommandLine)" -match $l[0]) { $launcher = $l[1]; $lanceur = $par; break } }
+        if ($launcher) { break }
+    }
+    $direct = $null; if ($chaine.Count -gt 0) { $direct = $chaine[0] }
+    if ($launcher) {
+        Add-Res Minecraft INFO ('Lancé avec : ' + $launcher) ('{0} (PID {1}) · {2}' -f $lanceur.Name, $lanceur.ProcessId, $lanceur.ExecutablePath) $lanceur.ExecutablePath
+    } elseif ($direct -and $direct.Name -match '(?i)^(explorer|cmd|powershell|pwsh|conhost|WindowsTerminal|OpenConsole)\.exe$') {
+        Add-Res Minecraft ORANGE ('Minecraft lancé à la main (' + $direct.Name + ')') 'Pas lancé par un launcher : quelqu''un a tapé la commande Java lui-même (méthode utilisée pour charger des clients modifiés). Demande au joueur comment il lance son jeu.' $direct.ExecutablePath
+    } elseif ($direct) {
+        $niv = 'ORANGE'; if ("$($direct.Name) $($direct.ExecutablePath)" -match $SS_RegexNom -or (Test-SurUsb $direct.ExecutablePath)) { $niv = 'ROUGE' }
+        Add-Res Minecraft $niv ('Lancé par un programme inconnu : ' + $direct.Name) ('PID {0} · {1} · ce n''est pas un launcher connu' -f $direct.ProcessId, $direct.ExecutablePath) $direct.ExecutablePath
+    } else {
+        $indice = $null
+        if ($Cmd -match '(?i)-Dminecraft\.launcher\.brand=(\S+)') { $indice = $Matches[1] }
+        $deduit = Format-Launcher (Get-LauncherChemin $(if ($GameDir) { $GameDir } else { "$($Proc.ExecutablePath)" }))
+        $det = 'le launcher est fermé (normal pour beaucoup de launchers)'
+        if ($indice) { $det += ' · marque déclarée par le launcher : ' + $indice }
+        Add-Res Minecraft INFO ('Lancé avec : ' + $deduit + ' (déduit des dossiers)') $det
+    }
+    # 3. Jars du classpath : client de triche ou jar hors des dossiers du launcher
+    $dejaVus = @{}
+    foreach ($m in [regex]::Matches($Cmd, '(?i)(?<![\w\\])[A-Z]:\\[^;"*?<>|\s]+?\.jar(?![\w])')) {
+        $j = $m.Value
+        if ($dejaVus.ContainsKey($j.ToLower())) { continue }
+        $dejaVus[$j.ToLower()] = $true
+        $nom = Split-Path $j -Leaf
+        if ($nom -eq 'theseus.jar' -and (Test-Path -LiteralPath $j) -and (Get-Item -LiteralPath $j).Length -lt 2MB) { continue }   # agent normal du Modrinth App
+        if ($nom -match $SS_RegexNom -and $nom -notmatch '(?i)^(authlib|brigadier|datafixerupper)') {
+            Add-Res Minecraft ROUGE ('Client suspect dans le classpath : ' + $nom) 'Le jeu a été lancé avec ce jar : nom de client de triche' $j
+        } elseif ($j -match '(?i)\\(Downloads|Téléchargements|Desktop|Bureau|Temp)\\' -or (Test-SurUsb $j)) {
+            $an = Get-AnalyseJar $j $nom
+            $niv = $(if ($an.Niveau -eq 'ROUGE') { 'ROUGE' } else { 'ORANGE' })
+            $det = 'le jeu charge ce jar hors des dossiers du launcher'
+            if ($an.Raisons) { $det = $an.Raisons + ' · ' + $det }
+            Add-Res Minecraft $niv ('Jar chargé depuis un dossier inhabituel : ' + $nom) $det $j
+        }
+    }
+}
+
+function Invoke-ScanLaunchers {
+    Set-Etape 12 'Launchers et clients installés...'
+    $mc = "$env:APPDATA\.minecraft"
+    $connus = [ordered]@{
+        'Launcher officiel Minecraft' = @("$mc\launcher_profiles.json", "$mc\launcher_accounts_microsoft_store.json", "${env:ProgramFiles(x86)}\Minecraft Launcher")
+        'Lunar Client'     = @("$env:USERPROFILE\.lunarclient")
+        'Feather Client'   = @("$env:APPDATA\.feather")
+        'Badlion Client'   = @("$env:APPDATA\Badlion Client", "$env:LOCALAPPDATA\Programs\Badlion Client")
+        'Modrinth App'     = @("$env:APPDATA\ModrinthApp", "$env:APPDATA\com.modrinth.theseus")
+        'Prism Launcher'   = @("$env:APPDATA\PrismLauncher")
+        'PolyMC'           = @("$env:APPDATA\PolyMC")
+        'CurseForge'       = @("$env:USERPROFILE\curseforge\minecraft")
+        'ATLauncher'       = @("$env:APPDATA\ATLauncher")
+        'GDLauncher'       = @("$env:APPDATA\gdlauncher_next", "$env:APPDATA\gdlauncher_carbon")
+        'LabyMod'          = @("$mc\labymod-neo", "$env:LOCALAPPDATA\Programs\labymodlauncher")
+        'Technic Launcher' = @("$env:APPDATA\.technic")
+        'TLauncher (cracké)'  = @("$env:APPDATA\.tlauncher")
+        'SKLauncher (cracké)' = @("$mc\sklauncher", "$env:APPDATA\.sklauncher")
+    }
+    $trouves = @()
+    foreach ($k in $connus.Keys) { foreach ($ch in $connus[$k]) { if ($ch -and (Test-Path -LiteralPath $ch)) { $trouves += $k; break } } }
+    if ($trouves.Count) { Add-Res Minecraft INFO ('Launchers / clients installés : ' + $trouves.Count) ($trouves -join ', ') }
+    else { Add-Res Minecraft INFO 'Launchers / clients installés' 'Aucun launcher connu trouvé : demande au joueur lequel il utilise.' }
+
+    # Versions installees dans .minecraft : un client de triche s'installe souvent comme une version
+    if (Test-Path -LiteralPath "$mc\versions") {
+        $perso = 0
+        foreach ($v in @(Get-ChildItem -LiteralPath "$mc\versions" -Directory -Force)) {
+            $n = $v.Name
+            if ($n -match '^\d+\.\d+(\.\d+)?([- ](pre|rc|snapshot|pre-release|release-candidate)[- ]?\d+)?$|^\d\dw\d\d[a-z]$|^fabric-loader-|^quilt-loader-|-forge-|^forge-|^neoforge-|-OptiFine_|^OptiFine|^LabyMod|^Badlion|^lunar') { continue }
+            $jar = Join-Path $v.FullName ($n + '.jar')
+            $niv = 'INFO'; $det = 'version personnalisée installée le ' + (Format-Date $v.CreationTime)
+            if ($n -match $SS_RegexNom) { $niv = 'ROUGE'; $det = 'nom de client de triche · ' + $det }
+            if ((Test-Path -LiteralPath $jar) -and (Get-Item -LiteralPath $jar).Length -lt 80MB) {
+                $an = Get-AnalyseJar $jar ($n + '.jar')
+                if ($an.Niveau -eq 'ROUGE') { $niv = 'ROUGE'; $det = $an.Raisons + ' · ' + $det }
+                elseif ($an.Niveau -and $niv -eq 'INFO' -and $an.Raisons -notmatch 'aucun fichier de mod') { $niv = 'ORANGE'; $det = $an.Raisons + ' · ' + $det }
+            }
+            $perso++
+            Add-Res Minecraft $niv ('Version de jeu : ' + $n) $det $v.FullName
+            if ($perso -ge 25) { break }
+        }
+    }
+    # Profils du launcher officiel : arguments Java caches (agent injecte a chaque lancement)
+    foreach ($fp in "$mc\launcher_profiles.json", "$mc\launcher_profiles_microsoft_store.json") {
+        if (-not (Test-Path -LiteralPath $fp)) { continue }
+        try { $js = [IO.File]::ReadAllText($fp) | ConvertFrom-Json } catch { continue }
+        if (-not $js.profiles) { continue }
+        foreach ($pp in $js.profiles.PSObject.Properties) {
+            $pr = $pp.Value; $nomP = "$($pr.name)"; if (-not $nomP) { $nomP = $pp.Name }
+            $ja = "$($pr.javaArgs)"
+            if ($ja -match '(?i)-javaagent|-agentpath|-agentlib:(?!jdwp)|-Xbootclasspath|-noverify') {
+                Add-Res Minecraft ROUGE ('Profil du launcher avec injection : ' + $nomP) ('arguments Java : ' + $ja) $fp
+            }
+            if ("$($pr.lastVersionId)" -match $SS_RegexNom) { Add-Res Minecraft ROUGE ('Profil du launcher sur une version suspecte : ' + $nomP) ('version : ' + $pr.lastVersionId) $fp }
+        }
+    }
 }
 
 function Invoke-ScanMods {
@@ -631,7 +814,16 @@ function Invoke-ScanMods {
         "$env:APPDATA\.tlauncher\legacy\Minecraft\game\mods",
         "$env:APPDATA\.feather\user-mods\*",
         "$env:USERPROFILE\curseforge\minecraft\Instances\*\mods",
-        "$env:USERPROFILE\.lunarclient\profiles\*\*\mods"
+        "$env:USERPROFILE\.lunarclient\profiles\*\*\mods",
+        "$env:APPDATA\PolyMC\instances\*\.minecraft\mods",
+        "$env:APPDATA\ATLauncher\instances\*\mods",
+        "$env:APPDATA\gdlauncher_next\instances\*\mods",
+        "$env:APPDATA\gdlauncher_carbon\data\instances\*\instance\mods",
+        "$env:APPDATA\.technic\modpacks\*\mods",
+        "$env:APPDATA\.minecraft\labymod-neo\addons",
+        "$env:APPDATA\ModrinthApp\profiles\*\resourcepacks",
+        "$env:APPDATA\PrismLauncher\instances\*\.minecraft\resourcepacks",
+        "$env:USERPROFILE\curseforge\minecraft\Instances\*\resourcepacks"
     )
     foreach ($mo in $motifs) {
         foreach ($it in @(Get-Item -Path $mo -Force | Where-Object { $_.PSIsContainer })) {
@@ -646,29 +838,53 @@ function Invoke-ScanMods {
         $cle = $plein.TrimEnd('\').ToLower()
         if ($vus.ContainsKey($cle)) { continue }
         $vus[$cle] = $true
-        $dossiers += [pscustomobject]@{ Chemin = $plein; Jeu = $d.Jeu; Packs = ((Split-Path $plein -Leaf) -eq 'resourcepacks') }
+        $l = Get-LauncherChemin $plein
+        $dossiers += [pscustomobject]@{ Chemin = $plein; Jeu = $d.Jeu; Packs = ((Split-Path $plein -Leaf) -eq 'resourcepacks'); Launcher = $l.Nom; Etiquette = (Format-Launcher $l) }
     }
     if ($dossiers.Count -eq 0) { Add-Res Mods INFO 'Aucun dossier mods trouvé' 'Le joueur utilise peut-être un launcher non reconnu : demande-lui où sont ses mods.' }
+    # le dossier du jeu lance passe en premier, puis tri par launcher et instance
+    $dossiers = @($dossiers | Sort-Object @{ Expression = { -not $_.Jeu } }, Launcher, Etiquette, Packs)
 
     $jars = @()
+    $parLauncher = [ordered]@{}
+    $ordre = 0
     foreach ($d in $dossiers) {
+        $ordre++
         $tag = ''
-        if ($d.Jeu) { $tag = ' (jeu lancé)' }
+        if ($d.Jeu) { $tag = '  (JEU LANCÉ)' }
         if ($d.Packs) {
             $packs = @(Get-ChildItem -LiteralPath $d.Chemin -Force)
-            Add-Res Mods INFO ("Packs de textures$tag : {0}" -f $packs.Count) $d.Chemin $d.Chemin
-            foreach ($pk in $packs) { if ($pk.Name -match '(?i)x-?ray|ore.?(esp|finder)|see.?through') { Add-Res Mods ORANGE 'Pack de textures X-Ray' $pk.Name $pk.FullName } }
+            $d | Add-Member -NotePropertyName Entete -NotePropertyValue @('INFO', ('{0} · packs de textures : {1}{2}' -f $d.Etiquette, $packs.Count, $tag))
+            $d | Add-Member -NotePropertyName Alertes -NotePropertyValue @($packs | Where-Object { $_.Name -match '(?i)x-?ray|ore.?(esp|finder)|see.?through' })
             continue
         }
         $fichiers = @(Get-ChildItem -LiteralPath $d.Chemin -Recurse -Depth 1 -File -Force)
         $lesJars = @($fichiers | Where-Object { $_.Extension -eq '.jar' })
-        Add-Res Mods INFO ("Dossier mods$tag : {0} jar(s)" -f $lesJars.Count) $d.Chemin $d.Chemin
-        foreach ($f in $fichiers) {
-            if ($f.Extension -match '(?i)^\.(exe|dll|zip|rar|7z|class|bat|cmd|ps1|vbs)$') { Add-Res Mods ORANGE 'Fichier bizarre dans un dossier mods' $f.Name $f.FullName }
-        }
+        if (-not $parLauncher.Contains($d.Launcher)) { $parLauncher[$d.Launcher] = 0 }
+        $parLauncher[$d.Launcher] += $lesJars.Count
+        $d | Add-Member -NotePropertyName Entete -NotePropertyValue @('INFO', ('{0} : {1} mod(s){2}' -f $d.Etiquette, $lesJars.Count, $tag))
+        $d | Add-Member -NotePropertyName Alertes -NotePropertyValue @($fichiers | Where-Object { $_.Extension -match '(?i)^\.(exe|dll|zip|rar|7z|class|bat|cmd|ps1|vbs)$' })
         foreach ($f in $lesJars) {
-            $jars += [pscustomobject]@{ Nom = $f.Name; Chemin = $f.FullName; Modif = $f.LastWriteTime; Jeu = $d.Jeu; Sha1 = $null }
+            $jars += [pscustomobject]@{ Nom = $f.Name; Chemin = $f.FullName; Modif = $f.LastWriteTime; Jeu = $d.Jeu; Sha1 = $null; Ordre = $ordre; Dossier = $d }
         }
+    }
+    if ($parLauncher.Count) { Add-Res Mods INFO 'Mods par launcher' (($parLauncher.Keys | ForEach-Object { '{0} : {1}' -f $_, $parLauncher[$_] }) -join ' · ') }
+    # en-tete de chaque dossier (les dossiers sans jar ou de packs sont affiches tout de suite)
+    $afficherEntete = {
+        param($d)
+        if ($d.PSObject.Properties['Fait']) { return }
+        $d | Add-Member -NotePropertyName Fait -NotePropertyValue $true
+        Add-Res Mods $d.Entete[0] ('▸ ' + $d.Entete[1]) $d.Chemin $d.Chemin
+        foreach ($a in $d.Alertes) {
+            if ($d.Packs) { Add-Res Mods ORANGE 'Pack de textures X-Ray' ('[' + $d.Etiquette + '] ' + $a.Name) $a.FullName }
+            else { Add-Res Mods ORANGE 'Fichier bizarre dans un dossier mods' ('[' + $d.Etiquette + '] ' + $a.Name) $a.FullName }
+        }
+    }
+    # affiche dans l'ordre tous les en-tetes jusqu'au dossier n (les dossiers vides ou de packs restent a leur place)
+    $script:SS_EnteteSuivant = 0
+    $entetesJusqua = {
+        param([int]$n)
+        while ($script:SS_EnteteSuivant -lt [Math]::Min($n, $dossiers.Count)) { & $afficherEntete $dossiers[$script:SS_EnteteSuivant]; $script:SS_EnteteSuivant++ }
     }
 
     $script:SS_NbJars = $jars.Count
@@ -679,11 +895,12 @@ function Invoke-ScanMods {
     $modrinth = Get-InfosModrinth $hashes
 
     $n = $jars.Count; $i = 0
-    foreach ($j in ($jars | Sort-Object Chemin)) {
+    foreach ($j in ($jars | Sort-Object Ordre, Nom)) {
         $i++
         Set-Etape (30 + [int](35 * $i / [Math]::Max(1, $n))) ('Analyse des mods ({0}/{1})...' -f $i, $n)
-        $recent = ''
-        if ($j.Modif -ge $script:SS_Depuis) { $recent = (' · modifié le {0:dd/MM HH:mm}' -f $j.Modif) }
+        & $entetesJusqua $j.Ordre
+        $recent = ' · [' + $j.Dossier.Etiquette + ']'
+        if ($j.Modif -ge $script:SS_Depuis) { $recent = (' · modifié le {0:dd/MM HH:mm}' -f $j.Modif) + $recent }
         if ($j.Jeu -and $script:SS_LancementJeu -and $j.Modif -gt $script:SS_LancementJeu) {
             Add-Res Mods ORANGE ('Jar modifié APRÈS le lancement du jeu : ' + $j.Nom) ('modifié le {0}' -f (Format-Date $j.Modif)) $j.Chemin
         }
@@ -703,6 +920,7 @@ function Invoke-ScanMods {
         if ($an.Niveau) { Add-Res Mods $an.Niveau $titre ($an.Raisons + ' · ' + $source + $recent) $j.Chemin }
         else { Add-Res Mods INFO $titre ($source + ', rien de suspect dedans' + $recent) $j.Chemin }
     }
+    & $entetesJusqua $dossiers.Count
 }
 
 function Invoke-ScanProgrammes {

@@ -28,7 +28,7 @@ exec python3 - "$@" <<'SNOWSS_FIN_PYTHON'
 import os, sys, re, io, json, glob, time, zipfile, hashlib, datetime, subprocess, pwd, platform, socket, shutil
 import urllib.request, urllib.parse
 
-VERSION = '1.2'
+VERSION = '1.3'
 HEURES = 48
 SEUIL_MODRINTH = 2000
 MIN_AVANT_SCAN = 30
@@ -278,8 +278,10 @@ def scan_minecraft():
             if sur_usb(gd): add('Minecraft', 'ROUGE', 'Dossier du jeu sur une clé USB', gd, gd)
             DOSSIERS.append((os.path.join(gd, 'mods'), True)); DOSSIERS.append((os.path.join(gd, 'resourcepacks'), True))
         JEUX.append((pid, gd, debut))
+        info_lancement(pid, args, gd)
         scan_injection(pid, args, ex, gd)
     if nb == 0: add('Minecraft', 'ORANGE', 'Aucun Minecraft lancé', 'Demande au joueur de garder son jeu ouvert pendant le scan.')
+    scan_launchers()
 
 def scan_injection(pid, args, ex, gd):
     etape('Injection dans le jeu (PID %d)' % pid)
@@ -371,52 +373,74 @@ def scan_injection(pid, args, ex, gd):
 def scan_mods():
     global NB_JARS
     etape('Mods')
-    motifs = ['~/.minecraft/mods', '~/.minecraft/resourcepacks',
+    motifs = ['~/.minecraft/mods', '~/.minecraft/resourcepacks', '~/.minecraft/labymod-neo/addons',
               '~/.local/share/ModrinthApp/profiles/*/mods', '~/.local/share/com.modrinth.theseus/profiles/*/mods',
+              '~/.local/share/ModrinthApp/profiles/*/resourcepacks',
               '~/.local/share/PrismLauncher/instances/*/.minecraft/mods', '~/.local/share/PrismLauncher/instances/*/minecraft/mods',
+              '~/.local/share/PrismLauncher/instances/*/.minecraft/resourcepacks',
               '~/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/instances/*/.minecraft/mods',
               '~/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/instances/*/minecraft/mods',
-              '~/.local/share/multimc/instances/*/.minecraft/mods', '~/.local/share/atlauncher/instances/*/mods',
+              '~/.local/share/PolyMC/instances/*/.minecraft/mods', '~/.local/share/multimc/instances/*/.minecraft/mods',
+              '~/.local/share/atlauncher/instances/*/mods', '~/.local/share/gdlauncher_carbon/data/instances/*/instance/mods',
+              '~/.technic/modpacks/*/mods', '~/.tlauncher/legacy/Minecraft/game/mods', '~/.feather/user-mods/*',
               '~/.lunarclient/profiles/*/*/mods', '~/.var/app/com.modrinth.ModrinthApp/data/ModrinthApp/profiles/*/mods']
     for mo in motifs:
         for d in glob.glob(mo.replace('~', HOME)):
             if os.path.isdir(d): DOSSIERS.append((d, False))
-    vus = set(); jars = []
+    vus = set(); dossiers = []
     for d, jeu in DOSSIERS:
         if not os.path.isdir(d): continue
         rp = os.path.realpath(d)
-        if rp in vus: continue
+        if rp in vus:
+            if jeu:
+                for x in dossiers:
+                    if x['chemin'] == rp: x['jeu'] = True
+            continue
         vus.add(rp)
-        tag = ' (jeu lancé)' if jeu else ''
-        if os.path.basename(rp) == 'resourcepacks':
+        l = launcher_chemin(rp)
+        dossiers.append({'chemin': rp, 'jeu': jeu, 'packs': os.path.basename(rp) == 'resourcepacks', 'launcher': l[0], 'etiquette': fmt_launcher(l)})
+    if not dossiers: add('Mods', 'INFO', 'Aucun dossier mods trouvé', "Launcher non reconnu : demande au joueur où sont ses mods.")
+    # dossier du jeu lance d'abord, puis tri par launcher et instance
+    dossiers.sort(key=lambda x: (not x['jeu'], x['launcher'], x['etiquette'], x['packs']))
+    jars = []; par_launcher = {}
+    for i, d in enumerate(dossiers):
+        tag = '  (JEU LANCÉ)' if d['jeu'] else ''
+        rp = d['chemin']
+        if d['packs']:
             packs = os.listdir(rp)
-            add('Mods', 'INFO', 'Packs de textures%s : %d' % (tag, len(packs)), rp, rp)
-            for pk in packs:
-                if re.search(r'(?i)x-?ray|ore.?(esp|finder)|see.?through', pk): add('Mods', 'ORANGE', 'Pack de textures X-Ray', pk, os.path.join(rp, pk))
+            d['entete'] = '%s · packs de textures : %d%s' % (d['etiquette'], len(packs), tag)
+            d['alertes'] = [('Pack de textures X-Ray', pk, os.path.join(rp, pk)) for pk in packs if re.search(r'(?i)x-?ray|ore.?(esp|finder)|see.?through', pk)]
             continue
         fich = []
         for racine, sous, fs in os.walk(rp):
             if racine.count(os.sep) - rp.count(os.sep) >= 2: sous[:] = []
             for f in fs: fich.append(os.path.join(racine, f))
         lj = [f for f in fich if f.endswith('.jar')]
-        add('Mods', 'INFO', 'Dossier mods%s : %d jar(s)' % (tag, len(lj)), rp, rp)
-        for f in fich:
-            if re.search(r'(?i)\.(exe|dll|so|zip|rar|7z|class|sh|py)$', f): add('Mods', 'ORANGE', 'Fichier bizarre dans un dossier mods', os.path.basename(f), f)
-        for f in lj: jars.append((f, jeu))
+        par_launcher[d['launcher']] = par_launcher.get(d['launcher'], 0) + len(lj)
+        d['entete'] = '%s : %d mod(s)%s' % (d['etiquette'], len(lj), tag)
+        d['alertes'] = [('Fichier bizarre dans un dossier mods', os.path.basename(f), f) for f in fich if re.search(r'(?i)\.(exe|dll|so|zip|rar|7z|class|sh|py)$', f)]
+        for f in lj: jars.append((i, os.path.basename(f), f, d))
     NB_JARS = len(jars)
-    if not jars and not vus: add('Mods', 'INFO', 'Aucun dossier mods trouvé', "Launcher non reconnu : demande au joueur où sont ses mods.")
+    if par_launcher: add('Mods', 'INFO', 'Mods par launcher', ' · '.join('%s : %d' % kv for kv in par_launcher.items()))
+    suivant = [0]
+    def entetes_jusqua(n):
+        while suivant[0] < min(n, len(dossiers)):
+            d = dossiers[suivant[0]]; suivant[0] += 1
+            add('Mods', 'INFO', '▸ ' + d['entete'], d['chemin'], d['chemin'])
+            for t, nom, ch in d['alertes']: add('Mods', 'ORANGE', t, '[%s] %s' % (d['etiquette'], nom), ch)
     print('  ' + C['G'] + 'Calcul des empreintes et vérification Modrinth (%d jars)...' % len(jars) + C['R'])
     sha = {}
-    for f, _ in jars:
+    for _, _, f, _ in jars:
         try:
             with open(f, 'rb') as fh: sha[f] = hashlib.sha1(fh.read()).hexdigest()
         except Exception: pass
     infos = modrinth(sorted(set(sha.values())))
-    for f, jeu in sorted(jars):
-        nom = os.path.basename(f)
+    for i, nom, f, d in sorted(jars, key=lambda x: (x[0], x[1].lower())):
+        entetes_jusqua(i + 1)
+        jeu = d['jeu']
         try: mt = os.path.getmtime(f)
         except Exception: mt = 0
-        recent = (' · modifié le ' + fdate(mt)) if mt >= DEPUIS else ''
+        recent = ((' · modifié le ' + fdate(mt)) if mt >= DEPUIS else '') + ' · [%s]' % d['etiquette']
         if jeu and LANCEMENT and mt > LANCEMENT: add('Mods', 'ORANGE', 'Jar modifié APRÈS le lancement du jeu : ' + nom, 'modifié le ' + fdate(mt), f)
         info = infos.get(sha.get(f))
         proj = info[0] if info else None
@@ -430,6 +454,134 @@ def scan_mods():
         titre = nom + ('  [id: %s]' % mid if mid else '')
         if niv: add('Mods', niv, titre, rs + ' · ' + src + recent, f)
         else: add('Mods', 'INFO', titre, src + ', rien de suspect dedans' + recent, f)
+    entetes_jusqua(len(dossiers))
+
+# ---------------- launchers et clients ----------------
+LAUNCHERS_PROC = [(r'(?i)^minecraft-launcher|minecraft launcher', 'Launcher officiel Minecraft'), (r'(?i)lunar', 'Lunar Client'),
+                  (r'(?i)feather', 'Feather Client'), (r'(?i)badlion', 'Badlion Client'), (r'(?i)modrinth|theseus', 'Modrinth App'),
+                  (r'(?i)prismlauncher', 'Prism Launcher'), (r'(?i)polymc', 'PolyMC'), (r'(?i)multimc', 'MultiMC'),
+                  (r'(?i)atlauncher', 'ATLauncher'), (r'(?i)gdlauncher', 'GDLauncher'), (r'(?i)tlauncher', 'TLauncher (launcher cracké)'),
+                  (r'(?i)sklauncher', 'SKLauncher (launcher cracké)'), (r'(?i)labymod', 'LabyMod'), (r'(?i)technic', 'Technic Launcher'),
+                  (r'(?i)hmcl', 'HMCL'), (r'(?i)portablemc', 'PortableMC'), (r'(?i)legacy.?launcher', 'Legacy Launcher (launcher cracké)')]
+
+def launcher_chemin(p):
+    c = (p or '').rstrip('/') + '/'
+    regles = [(r'/(?:ModrinthApp|com\.modrinth\.theseus)/profiles/([^/]+)/', 'Modrinth App'), (r'/PrismLauncher/instances/([^/]+)/', 'Prism Launcher'),
+              (r'/PolyMC/instances/([^/]+)/', 'PolyMC'), (r'/multimc/instances/([^/]+)/', 'MultiMC'), (r'/atlauncher/instances/([^/]+)/', 'ATLauncher'),
+              (r'/gdlauncher[^/]*/(?:data/)?instances/([^/]+)/', 'GDLauncher'), (r'/\.technic/modpacks/([^/]+)/', 'Technic Launcher'),
+              (r'/\.lunarclient/profiles/([^/]+/[^/]+)/', 'Lunar Client'), (r'/\.lunarclient/()', 'Lunar Client'),
+              (r'/\.feather/user-mods/([^/]+)/', 'Feather Client'), (r'/\.feather/()', 'Feather Client'),
+              (r'/\.tlauncher/()', 'TLauncher (launcher cracké)'), (r'/labymod-neo/()', 'LabyMod'), (r'/\.minecraft/()', 'Launcher officiel / .minecraft')]
+    for rg, nom in regles:
+        m = re.search('(?i)' + rg, c)
+        if m: return (nom, m.group(1).replace('/', ' / '))
+    return ('Autre dossier', '')
+
+def fmt_launcher(l):
+    return '%s · %s' % l if l[1] else l[0]
+
+def client_jeu(cmd):
+    c = []
+    if re.search(r'(?i)com\.moonsworth|/\.lunarclient/', cmd): c.append('Lunar Client')
+    if re.search(r'(?i)/\.feather/|net\.digitalingot', cmd): c.append('Feather Client')
+    if re.search(r'(?i)net\.badlion', cmd): c.append('Badlion Client')
+    if re.search(r'(?i)net\.labymod|labymod', cmd): c.append('LabyMod')
+    m = re.search(r'(?i)--fml\.neoForgeVersion\s+(\S+)', cmd); m2 = re.search(r'(?i)--fml\.forgeVersion\s+(\S+)', cmd)
+    if m: c.append('NeoForge ' + m.group(1))
+    elif re.search(r'(?i)net\.neoforged', cmd): c.append('NeoForge')
+    elif m2: c.append('Forge ' + m2.group(1))
+    elif re.search(r'(?i)cpw\.mods|net\.minecraftforge|FMLTweaker', cmd): c.append('Forge')
+    if re.search(r'(?i)org\.quiltmc\.loader', cmd):
+        m = re.search(r'(?i)quilt-loader[-/](\d[\w.+-]*?)(\.jar|/)', cmd); c.append('Quilt' + (' ' + m.group(1) if m else ''))
+    elif re.search(r'(?i)net\.fabricmc\.loader', cmd):
+        m = re.search(r'(?i)fabric-loader[-/](\d[\w.+-]*?)(\.jar|/)', cmd); c.append('Fabric' + (' ' + m.group(1) if m else ''))
+    if re.search(r'(?i)optifine', cmd): c.append('OptiFine')
+    return ' + '.join(c) if c else 'Vanilla (sans chargeur de mods)'
+
+def ppid(pid):
+    m = re.search(r'PPid:\s*(\d+)', lire('/proc/%d/status' % pid) or '')
+    return int(m.group(1)) if m else 0
+
+def info_lancement(pid, args, gd):
+    tout = ' '.join(args)
+    add('Minecraft', 'INFO', 'Client : ' + client_jeu(tout), 'PID %d' % pid)
+    cur = pid; chaine = []
+    for _ in range(5):
+        p = ppid(cur)
+        if p <= 1: break
+        chaine.append(p); cur = p
+    launcher = None
+    for p in chaine:
+        a = cmdline(p); c = comm(p); t = c + ' ' + ' '.join(a)
+        if a and os.path.basename(a[0]).startswith('java') and RE_JEU.search(t) and '-jar' not in a: continue
+        for rg, nom in LAUNCHERS_PROC:
+            if re.search(rg, t): launcher = (nom, p, exe(p) or (a[0] if a else c)); break
+        if launcher: break
+    direct = chaine[0] if chaine else None
+    if launcher:
+        add('Minecraft', 'INFO', 'Lancé avec : ' + launcher[0], '%s (PID %d) · %s' % (comm(launcher[1]), launcher[1], launcher[2]), launcher[2])
+    elif direct and re.match(r'(?i)^(ba|z|da|fi)?sh$|^(konsole|gnome-terminal.*|kitty|alacritty|xterm|foot|wezterm.*|tilix|terminator|xfce4-terminal|tmux.*|screen)$', comm(direct)):
+        add('Minecraft', 'ORANGE', 'Minecraft lancé à la main (%s)' % comm(direct), "Pas lancé par un launcher : la commande Java a été tapée à la main (méthode utilisée pour charger des clients modifiés). Demande au joueur comment il lance son jeu.", exe(direct) or '')
+    elif direct and not re.match(r'(?i)^(systemd|init|bwrap|flatpak.*|snap.*)$', comm(direct)):
+        e = exe(direct) or ''
+        niv = 'ROUGE' if (RE_NOM.search(comm(direct) + ' ' + e) or sur_usb(e)) else 'ORANGE'
+        add('Minecraft', niv, 'Lancé par un programme inconnu : ' + comm(direct), "PID %d · %s · ce n'est pas un launcher connu" % (direct, e), e)
+    else:
+        m = re.search(r'-Dminecraft\.launcher\.brand=(\S+)', tout)
+        det = 'le launcher est fermé (normal pour beaucoup de launchers)' + (' · marque déclarée : ' + m.group(1) if m else '')
+        add('Minecraft', 'INFO', 'Lancé avec : %s (déduit des dossiers)' % fmt_launcher(launcher_chemin(gd or exe(pid) or '')), det)
+    # jars du classpath / agents : client de triche ou jar hors des dossiers du launcher
+    vus = set()
+    for a in args:
+        for j in re.findall(r'(/[^:\s"]+?\.jar)(?=$|[:=\s])', a):
+            if j in vus: continue
+            vus.add(j); nom = os.path.basename(j)
+            if nom == 'theseus.jar': continue
+            if RE_NOM.search(nom) and not re.match(r'(?i)^(authlib|brigadier|datafixerupper)', nom):
+                add('Minecraft', 'ROUGE', 'Client suspect dans le classpath : ' + nom, 'Le jeu a été lancé avec ce jar : nom de client de triche', j)
+            elif re.search(r'(?i)/(downloads|téléchargements|desktop|bureau|tmp)/', j) or sur_usb(j):
+                n2, rs, _ = analyse_jar(j, nom)
+                add('Minecraft', 'ROUGE' if n2 == 'ROUGE' else 'ORANGE', 'Jar chargé depuis un dossier inhabituel : ' + nom, (rs + ' · ' if rs else '') + 'le jeu charge ce jar hors des dossiers du launcher', j)
+
+def scan_launchers():
+    etape('Launchers et clients installés')
+    mc = os.path.join(HOME, '.minecraft')
+    connus = [('Launcher officiel Minecraft', [mc + '/launcher_profiles.json', '/opt/minecraft-launcher', '/usr/bin/minecraft-launcher']),
+              ('Lunar Client', [HOME + '/.lunarclient']), ('Feather Client', [HOME + '/.feather']),
+              ('Badlion Client', [HOME + '/.config/Badlion Client', HOME + '/Badlion Client']),
+              ('Modrinth App', [HOME + '/.local/share/ModrinthApp', HOME + '/.local/share/com.modrinth.theseus', HOME + '/.var/app/com.modrinth.ModrinthApp']),
+              ('Prism Launcher', [HOME + '/.local/share/PrismLauncher', HOME + '/.var/app/org.prismlauncher.PrismLauncher']),
+              ('PolyMC', [HOME + '/.local/share/PolyMC']), ('MultiMC', [HOME + '/.local/share/multimc']),
+              ('ATLauncher', [HOME + '/.local/share/atlauncher']), ('GDLauncher', [HOME + '/.local/share/gdlauncher_carbon']),
+              ('LabyMod', [mc + '/labymod-neo']), ('Technic Launcher', [HOME + '/.technic']),
+              ('TLauncher (cracké)', [HOME + '/.tlauncher']), ('SKLauncher (cracké)', [mc + '/sklauncher', HOME + '/.sklauncher'])]
+    trouves = [n for n, ps in connus if any(os.path.exists(p) for p in ps)]
+    if trouves: add('Minecraft', 'INFO', 'Launchers / clients installés : %d' % len(trouves), ', '.join(trouves))
+    else: add('Minecraft', 'INFO', 'Launchers / clients installés', 'Aucun launcher connu trouvé : demande au joueur lequel il utilise.')
+    vd = os.path.join(mc, 'versions')
+    if os.path.isdir(vd):
+        n = 0
+        for v in sorted(os.listdir(vd)):
+            if re.match(r'(?i)^\d+\.\d+(\.\d+)?([- ](pre|rc|snapshot)[- ]?\d+)?$|^\d\dw\d\d[a-z]$|^fabric-loader-|^quilt-loader-|-forge-|^forge-|^neoforge-|-OptiFine_|^OptiFine|^LabyMod|^Badlion|^lunar', v): continue
+            jar = os.path.join(vd, v, v + '.jar')
+            niv = 'INFO'; det = 'version personnalisée'
+            if RE_NOM.search(v): niv = 'ROUGE'; det = 'nom de client de triche · ' + det
+            if os.path.isfile(jar) and os.path.getsize(jar) < 80 << 20:
+                n2, rs, _ = analyse_jar(jar, v + '.jar')
+                if n2 == 'ROUGE': niv = 'ROUGE'; det = rs + ' · ' + det
+                elif n2 and niv == 'INFO' and 'aucun fichier de mod' not in rs: niv = 'ORANGE'; det = rs + ' · ' + det
+            add('Minecraft', niv, 'Version de jeu : ' + v, det, os.path.join(vd, v))
+            n += 1
+            if n >= 25: break
+    for fp in (mc + '/launcher_profiles.json',):
+        try: js = json.loads(lire(fp) or '{}')
+        except Exception: continue
+        for k, pr in (js.get('profiles') or {}).items():
+            nomp = pr.get('name') or k; ja = pr.get('javaArgs') or ''
+            if re.search(r'(?i)-javaagent|-agentpath|-agentlib:(?!jdwp)|-Xbootclasspath|-noverify', ja):
+                add('Minecraft', 'ROUGE', 'Profil du launcher avec injection : ' + nomp, 'arguments Java : ' + ja, fp)
+            if RE_NOM.search(pr.get('lastVersionId') or ''):
+                add('Minecraft', 'ROUGE', 'Profil du launcher sur une version suspecte : ' + nomp, 'version : ' + pr.get('lastVersionId'), fp)
 
 def scan_log():
     for pid, gd, _ in JEUX:
