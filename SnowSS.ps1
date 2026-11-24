@@ -574,6 +574,109 @@ public static class SnowTouches {
 }
 '@
 
+$SS_CodeMemoire = @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class SnowMemoire {
+    [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint acc, bool inh, uint pid);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll")] static extern bool ReadProcessMemory(IntPtr h, IntPtr adr, byte[] buf, IntPtr taille, out IntPtr lu);
+    [DllImport("kernel32.dll")] static extern IntPtr VirtualQueryEx(IntPtr h, IntPtr adr, out MBI m, IntPtr len);
+    [StructLayout(LayoutKind.Sequential)] struct MBI { public IntPtr BaseAddress; public IntPtr AllocationBase; public uint AllocationProtect; public uint A; public IntPtr RegionSize; public uint State; public uint Protect; public uint Type; public uint B; }
+    public class Trouve { public string Motif; public int Nombre; public string Extrait; }
+
+    // Cherche des textes (insensible a la casse) dans toute la memoire lisible d'un processus. Lecture seule.
+    public static List<Trouve> Chercher(uint pid, string[] motifs, long maxOctets, int maxSecondes, out long lus, out string erreur) {
+        lus = 0; erreur = null;
+        var res = new Dictionary<int, Trouve>();
+        var pats = new byte[motifs.Length][];
+        var mot = new bool[motifs.Length];   // motif commencant par "~" : mot entier seulement
+        var table = new List<int>[256];
+        int maxLen = 1;
+        for (int i = 0; i < motifs.Length; i++) {
+            string s = motifs[i];
+            if (s.StartsWith("~")) { mot[i] = true; s = s.Substring(1); }
+            pats[i] = Encoding.ASCII.GetBytes(s.ToLowerInvariant());
+            int b0 = pats[i][0];
+            if (table[b0] == null) table[b0] = new List<int>();
+            table[b0].Add(i);
+            if (pats[i].Length > maxLen) maxLen = pats[i].Length;
+        }
+        IntPtr h = OpenProcess(0x0400 | 0x0010, false, pid);
+        if (h == IntPtr.Zero) { erreur = "impossible d'ouvrir le jeu (relance en administrateur)"; return null; }
+        var chrono = System.Diagnostics.Stopwatch.StartNew();
+        const int BLOC = 4 << 20;
+        byte[] buf = new byte[BLOC + 256];
+        try {
+          // passe 0 : petites zones (metaspace, code : là où sont les noms de classes) ; passe 1 : grosses zones (tas Java)
+          for (int passe = 0; passe < 2; passe++) {
+            long adr = 0x10000; long fin = 0x7FFFFFFEFFFF;
+            MBI m;
+            while (adr < fin) {
+                if (VirtualQueryEx(h, new IntPtr(adr), out m, new IntPtr(Marshal.SizeOf(typeof(MBI)))) == IntPtr.Zero) break;
+                long base0 = m.BaseAddress.ToInt64(); long taille = m.RegionSize.ToInt64();
+                if (taille <= 0) break;
+                adr = base0 + taille;
+                bool lisible = m.State == 0x1000 && (m.Protect & 0x101) == 0 && (m.Protect & 0xEE) != 0;
+                if (!lisible) continue;
+                bool grosse = taille > (128L << 20);
+                if ((passe == 0) == grosse) continue;
+                for (long off = 0; off < taille; off += BLOC) {
+                    if (lus >= maxOctets) { erreur = "limite de lecture atteinte"; goto finir; }
+                    if (chrono.Elapsed.TotalSeconds > maxSecondes) { erreur = "temps limite atteint"; goto finir; }
+                    int n = (int)Math.Min(BLOC + maxLen, taille - off);
+                    IntPtr lu;
+                    if (!ReadProcessMemory(h, new IntPtr(base0 + off), buf, new IntPtr(n), out lu)) continue;
+                    int nl = (int)lu.ToInt64(); if (nl <= 0) continue;
+                    lus += Math.Min(nl, BLOC);
+                    for (int i = 0; i < nl; i++) { byte c = buf[i]; if (c >= 65 && c <= 90) buf[i] = (byte)(c + 32); }
+                    int lim = Math.Min(nl, BLOC);
+                    for (int i = 0; i < lim; i++) {
+                        var l = table[buf[i]];
+                        if (l == null) continue;
+                        foreach (int p in l) {
+                            byte[] pt = pats[p];
+                            if (i + pt.Length > nl) continue;
+                            int k = 1;
+                            while (k < pt.Length && buf[i + k] == pt[k]) k++;
+                            if (k < pt.Length) continue;
+                            if (mot[p]) {
+                                byte av = i > 0 ? buf[i - 1] : (byte)32, ap = i + pt.Length < nl ? buf[i + pt.Length] : (byte)32;
+                                if ((av >= 97 && av <= 122) || (ap >= 97 && ap <= 122)) continue;
+                            }
+                            Trouve t;
+                            if (!res.TryGetValue(p, out t)) {
+                                int d = Math.Max(0, i - 40), f = Math.Min(nl, i + pt.Length + 60);
+                                var sb = new StringBuilder();
+                                for (int x = d; x < f; x++) { byte c = buf[x]; sb.Append(c >= 32 && c < 127 ? (char)c : '.'); }
+                                t = new Trouve { Motif = motifs[p], Nombre = 0, Extrait = sb.ToString() };
+                                res[p] = t;
+                            }
+                            t.Nombre++;
+                        }
+                    }
+                }
+            }
+          }
+        } finally { CloseHandle(h); }
+        finir:
+        return new List<Trouve>(res.Values);
+    }
+
+    // Version en arrière-plan : l'interface reste fluide pendant la lecture
+    public class Resultat { public List<Trouve> Liste; public long Lus; public string Erreur; }
+    public static System.Threading.Tasks.Task<Resultat> ChercherAsync(uint pid, string[] motifs, long maxOctets, int maxSecondes) {
+        return System.Threading.Tasks.Task.Run(() => {
+            long lus; string err;
+            var l = Chercher(pid, motifs, maxOctets, maxSecondes, out lus, out err);
+            return new Resultat { Liste = l, Lus = lus, Erreur = err };
+        });
+    }
+}
+'@
+
 function Initialize-Natif {
     if (-not ('SnowNatif' -as [type])) { Add-Type -TypeDefinition $SS_CodeNatif -ErrorAction Stop }
 }
@@ -798,8 +901,59 @@ function Invoke-ScanInjection {
             Add-Res Injection INFO 'Threads du jeu' 'Illisibles : relance le scan en administrateur.'
         }
     } catch { Add-Res Injection INFO 'Threads du jeu' ('Vérification impossible : ' + $_.Exception.Message) }
+    Invoke-ScanMemoireJeu $gp.Id $titreJeu
 }
 
+# Cherche des traces de cheat dans la mémoire du jeu (lecture seule) : marche quelle que soit la façon dont le cheat a été injecté
+$SS_MemPaquets = @('meteordevelopment/', 'net/wurstclient/', 'net/ccbluex/', 'org/rusherhack/', 'thunder/hack/', 'bleach/hack/', 'org/bleachhack/', 'me/zeroeightsix/kami/', 'com/lambda/client/', 'dev/boze/', 'me/earth/earthhack/', 'me/alpha432/oyvey/', 'me/deftware/', 'dev/lvstrng/argon/', 'net/impactclient/', 'dev/quelchi/aurora', 'dev/zprestige/', 'prestige/client/', 'net/aristois/', 'doomsday/client', 'cc/novoline/', 'vape/gui/', 'net/futureclient/')
+$SS_MemStructure = @('/modules/combat/', '/module/combat/', '/modules/movement/', '/module/movement/', '/module/modules/', '/hacks/combat/', '/hack/hacks/', '/features/combat/', '/modules/ghost/', '/module/ghost/', '/modules/crystal/', '/combat/killaura', '/combat/triggerbot', '/combat/aimassist', '/combat/autocrystal')
+$SS_MemMots = @('killaura', 'triggerbot', 'aimassist', 'autocrystal', 'crystalaura', 'anchoraura', 'autoanchor', 'hovertotem', 'autoclicker', 'clickgui', 'selfdestruct', 'autodoublehand', 'autohitcrystal', 'legittotem', 'shielddisabler')
+
+function Invoke-ScanMemoireJeu {
+    param([int]$IdJeu, [string]$TitreJeu)
+    Set-Etape 13 'Recherche de cheats dans la mémoire du jeu (jusqu''à 1 min)...'
+    try { if (-not ('SnowMemoire' -as [type])) { Add-Type -TypeDefinition $SS_CodeMemoire -ErrorAction Stop } }
+    catch { Add-Res Injection INFO 'Mémoire du jeu' ('Vérification impossible : ' + $_.Exception.Message); return }
+    $motifs = @($SS_MemPaquets) + @($SS_MemStructure) + @($SS_MemMots | ForEach-Object { '~' + $_ })
+    $tache = [SnowMemoire]::ChercherAsync([uint32]$IdJeu, [string[]]$motifs, 12GB, 75)
+    while (-not $tache.IsCompleted) { Invoke-Pompe; Start-Sleep -Milliseconds 120 }
+    $r = $tache.Result
+    if ($null -eq $r.Liste) { Add-Res Injection INFO 'Mémoire du jeu' ("Non lue : $($r.Erreur)"); return }
+    $partiel = ''
+    if ($r.Erreur) { $partiel = ' (lecture partielle : ' + $r.Erreur + ')' }
+    $lu = Format-Taille $r.Lus
+    $chemins = {
+        param($liste)
+        $out = @()
+        foreach ($t in $liste) {
+            $mt = $t.Motif.Trim('/', '~')
+            foreach ($m in [regex]::Matches($t.Extrait, '[a-z0-9_$]+(/[a-z0-9_$]+){1,}/?')) {
+                $v = $m.Value
+                if ($v -match '^l(dev|net|com|me|org|cc|io)/') { $v = $v.Substring(1) }
+                if ($v.Length -ge 8 -and $v.Contains($mt) -and $out -notcontains $v) { $out += $v }
+            }
+        }
+        return ($out | Select-Object -First 4)
+    }
+    $paq = @($r.Liste | Where-Object { $SS_MemPaquets -contains $_.Motif })
+    $str = @($r.Liste | Where-Object { $SS_MemStructure -contains $_.Motif })
+    $mots = @($r.Liste | Where-Object { $_.Motif.StartsWith('~') } | Sort-Object Nombre -Descending)
+    if ($paq.Count) {
+        Add-Res Injection ROUGE ('Client de triche chargé dans la mémoire du jeu : ' + (($paq | ForEach-Object { $_.Motif.Trim('/') }) -join ', ')) ('Son code est en mémoire même s''il n''y a aucun jar dans le dossier mods (injecté ou téléchargé au lancement) · ' + ((& $chemins $paq) -join ' · ') + ' · ' + $TitreJeu) ''
+    }
+    if ($str.Count) {
+        Add-Res Injection ROUGE 'Structure de client de triche dans la mémoire du jeu' ('Des classes rangées comme un client de triche (modules/combat, modules/movement...) sont chargées : ' + ((& $chemins $str) -join ' · ') + ' · ' + $TitreJeu) ''
+    }
+    if ($mots.Count) {
+        $noms = ($mots | ForEach-Object { '{0} (x{1})' -f $_.Motif.TrimStart('~'), $_.Nombre }) -join ', '
+        $ex = ($mots[0].Extrait -replace '\.{3,}', ' … ').Trim()
+        $niv = $(if ($mots.Count -ge 3 -or $paq.Count -or $str.Count) { 'ROUGE' } else { 'ORANGE' })
+        Add-Res Injection $niv ('Noms de modules de triche dans la mémoire du jeu : ' + $mots.Count) ($noms + ' · exemple : « ' + $ex + ' » · ' + $TitreJeu) ''
+    }
+    if (-not ($paq.Count -or $str.Count -or $mots.Count)) {
+        Add-Res Injection OK 'Mémoire du jeu' ("$lu lus : aucun code ni nom de module de triche$partiel ($TitreJeu).")
+    } elseif ($partiel) { Add-Res Injection INFO 'Mémoire du jeu' "$lu lus$partiel." }
+}
 # Compare les mods charges par le jeu (logs\latest.log) avec ceux encore presents
 function Invoke-ScanLogJeu {
     Set-Etape 66 'Comparaison avec le log du jeu...'

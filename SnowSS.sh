@@ -28,7 +28,7 @@ exec python3 - "$@" <<'SNOWSS_FIN_PYTHON'
 import os, sys, re, io, json, glob, time, zipfile, hashlib, datetime, subprocess, pwd, platform, socket, shutil
 import urllib.request, urllib.parse
 
-VERSION = '1.4'
+VERSION = '1.5'
 HEURES = 48
 SEUIL_MODRINTH = 2000
 MIN_AVANT_SCAN = 30
@@ -387,6 +387,81 @@ def scan_injection(pid, args, ex, gd):
             n2, rs, _ = analyse_jar(cible, os.path.basename(cible))
             add('Injection', n2 or 'ORANGE', 'Jar ouvert par le jeu hors des dossiers habituels : ' + os.path.basename(cible), (rs + ' · ' if rs else '') + cible, cible)
 
+    scan_memoire(pid)
+
+# ---------------- recherche dans la memoire du jeu (lecture seule) ----------------
+MEM_PAQ = ['meteordevelopment/', 'net/wurstclient/', 'net/ccbluex/', 'org/rusherhack/', 'thunder/hack/', 'bleach/hack/', 'org/bleachhack/',
+           'me/zeroeightsix/kami/', 'com/lambda/client/', 'dev/boze/', 'me/earth/earthhack/', 'me/alpha432/oyvey/', 'me/deftware/',
+           'dev/lvstrng/argon/', 'net/impactclient/', 'dev/quelchi/aurora', 'dev/zprestige/', 'prestige/client/', 'net/aristois/',
+           'doomsday/client', 'cc/novoline/', 'vape/gui/', 'net/futureclient/']
+MEM_STRUCT = ['/modules/combat/', '/module/combat/', '/modules/movement/', '/module/movement/', '/module/modules/', '/hacks/combat/',
+              '/hack/hacks/', '/features/combat/', '/modules/ghost/', '/module/ghost/', '/modules/crystal/', '/combat/killaura',
+              '/combat/triggerbot', '/combat/aimassist', '/combat/autocrystal']
+MEM_MOTS = ['killaura', 'triggerbot', 'aimassist', 'autocrystal', 'crystalaura', 'anchoraura', 'autoanchor', 'hovertotem', 'autoclicker',
+            'clickgui', 'selfdestruct', 'autodoublehand', 'autohitcrystal', 'legittotem', 'shielddisabler']
+
+def scan_memoire(pid):
+    etape("Recherche de cheats dans la mémoire du jeu (jusqu'à 1 min)")
+    etiquettes = MEM_PAQ + MEM_STRUCT + ['~' + w for w in MEM_MOTS]
+    morceaux = [re.escape(x.encode()) for x in MEM_PAQ + MEM_STRUCT] + [rb'(?<![a-z])' + re.escape(w.encode()) + rb'(?![a-z])' for w in MEM_MOTS]
+    rx = re.compile(b'|'.join(b'(' + m + b')' for m in morceaux))
+    zones = []
+    for l in (lire('/proc/%d/maps' % pid) or '').splitlines():
+        p = l.split()
+        if len(p) < 2 or not p[1].startswith('r') or (len(p) >= 6 and p[5] in ('[vvar]', '[vsyscall]', '[vvar_vclock]')): continue
+        a, b = [int(x, 16) for x in p[0].split('-')]
+        zones.append((a, b))
+    if not zones: add('Injection', 'INFO', 'Mémoire du jeu', 'Illisible : relance avec sudo.'); return
+    zones.sort(key=lambda z: (z[1] - z[0] > (128 << 20), z[0]))   # petites zones (noms de classes) d'abord
+    trouve = {}; lus = 0; debut = time.time(); partiel = ''
+    try: fm = open('/proc/%d/mem' % pid, 'rb', 0)
+    except Exception: add('Injection', 'INFO', 'Mémoire du jeu', 'Illisible : relance avec sudo.'); return
+    BLOC = 4 << 20
+    with fm:
+        for a, b in zones:
+            off = a
+            while off < b:
+                if time.time() - debut > 75: partiel = ' (lecture partielle : temps limite)'; break
+                if lus > (12 << 30): partiel = ' (lecture partielle : limite atteinte)'; break
+                n = min(BLOC + 64, b - off)
+                try:
+                    fm.seek(off); d = fm.read(n)
+                except Exception:
+                    break
+                if not d: break
+                lus += min(len(d), BLOC)
+                d = d.lower()
+                for m in rx.finditer(d):
+                    k = m.lastindex - 1
+                    if k not in trouve:
+                        ex = d[max(0, m.start() - 40):m.end() + 60]
+                        trouve[k] = [0, ''.join(chr(c) if 32 <= c < 127 else '.' for c in ex)]
+                    trouve[k][0] += 1
+                off += BLOC
+            if partiel: break
+    def chemins(ks):
+        out = []
+        for k in ks:
+            mt = etiquettes[k].strip('/~')
+            for m in re.finditer(r'[a-z0-9_$]+(/[a-z0-9_$]+){1,}/?', trouve[k][1]):
+                v = m.group(0)
+                if re.match(r'^l(dev|net|com|me|org|cc|io)/', v): v = v[1:]
+                if len(v) >= 8 and mt in v and v not in out: out.append(v)
+        return out[:4]
+    paq = [k for k in trouve if k < len(MEM_PAQ)]
+    st = [k for k in trouve if len(MEM_PAQ) <= k < len(MEM_PAQ) + len(MEM_STRUCT)]
+    mots = sorted([k for k in trouve if k >= len(MEM_PAQ) + len(MEM_STRUCT)], key=lambda k: -trouve[k][0])
+    titre = 'jeu PID %d' % pid
+    if paq: add('Injection', 'ROUGE', 'Client de triche chargé dans la mémoire du jeu : ' + ', '.join(etiquettes[k].strip('/') for k in paq),
+                "Son code est en mémoire même s'il n'y a aucun jar dans le dossier mods (injecté ou téléchargé au lancement) · " + ' · '.join(chemins(paq)) + ' · ' + titre)
+    if st: add('Injection', 'ROUGE', 'Structure de client de triche dans la mémoire du jeu',
+               'Des classes rangées comme un client de triche (modules/combat, modules/movement...) sont chargées : ' + ' · '.join(chemins(st)) + ' · ' + titre)
+    if mots:
+        noms = ', '.join('%s (x%d)' % (etiquettes[k].lstrip('~'), trouve[k][0]) for k in mots)
+        ex = re.sub(r'\.{3,}', ' … ', trouve[mots[0]][1]).strip()
+        add('Injection', 'ROUGE' if (len(mots) >= 3 or paq or st) else 'ORANGE', 'Noms de modules de triche dans la mémoire du jeu : %d' % len(mots), noms + ' · exemple : « ' + ex + ' » · ' + titre)
+    if not (paq or st or mots): add('Injection', 'OK', 'Mémoire du jeu', '%s lus : aucun code ni nom de module de triche%s (%s).' % (ftaille(lus), partiel, titre))
+    elif partiel: add('Injection', 'INFO', 'Mémoire du jeu', ftaille(lus) + ' lus' + partiel + '.')
 def scan_mods():
     global NB_JARS
     etape('Mods')
