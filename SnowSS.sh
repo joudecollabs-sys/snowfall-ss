@@ -49,8 +49,8 @@ CATS = [('Systeme', 'Système'), ('Minecraft', 'Minecraft'), ('Injection', 'Inje
         ('Mods', 'Mods'), ('Programmes', 'Programmes'), ('Macros', 'Macros / autoclick'), ('Usb', 'USB'),
         ('Fichiers', 'Fichiers récents'), ('Corbeille', 'Corbeille')]
 
-def add(cat, niv, titre, detail='', chemin=''):
-    RES.append((cat, niv, titre, detail, chemin))
+def add(cat, niv, titre, detail='', chemin='', groupe=''):
+    RES.append((cat, niv, titre, detail, chemin, groupe))
     d = ('  ' + C['G'] + detail + C['R']) if detail else ''
     print('  {}[{:<6}]{} {}{}'.format(C[niv], niv, C['R'], titre, d))
 
@@ -426,8 +426,8 @@ def scan_mods():
     def entetes_jusqua(n):
         while suivant[0] < min(n, len(dossiers)):
             d = dossiers[suivant[0]]; suivant[0] += 1
-            add('Mods', 'INFO', '▸ ' + d['entete'], d['chemin'], d['chemin'])
-            for t, nom, ch in d['alertes']: add('Mods', 'ORANGE', t, '[%s] %s' % (d['etiquette'], nom), ch)
+            add('Mods', 'INFO', '▸ ' + d['entete'], d['chemin'], d['chemin'], d['launcher'])
+            for t, nom, ch in d['alertes']: add('Mods', 'ORANGE', t, '[%s] %s' % (d['etiquette'], nom), ch, d['launcher'])
     print('  ' + C['G'] + 'Calcul des empreintes et vérification Modrinth (%d jars)...' % len(jars) + C['R'])
     sha = {}
     for _, _, f, _ in jars:
@@ -441,19 +441,19 @@ def scan_mods():
         try: mt = os.path.getmtime(f)
         except Exception: mt = 0
         recent = ((' · modifié le ' + fdate(mt)) if mt >= DEPUIS else '') + ' · [%s]' % d['etiquette']
-        if jeu and LANCEMENT and mt > LANCEMENT: add('Mods', 'ORANGE', 'Jar modifié APRÈS le lancement du jeu : ' + nom, 'modifié le ' + fdate(mt), f)
+        if jeu and LANCEMENT and mt > LANCEMENT: add('Mods', 'ORANGE', 'Jar modifié APRÈS le lancement du jeu : ' + nom, 'modifié le ' + fdate(mt), f, d['launcher'])
         info = infos.get(sha.get(f))
         proj = info[0] if info else None
         if proj and proj.get('downloads', 0) >= SEUIL_MODRINTH:
-            add('Mods', 'OK', nom, '%s %s · %s téléchargements sur Modrinth%s' % (proj.get('title'), info[1], format(proj.get('downloads', 0), ',').replace(',', ' '), recent), f)
-            if RE_INTERDIT.search(proj.get('slug', '')): add('Mods', 'ORANGE', 'Mod interdit sur la plupart des serveurs : ' + proj.get('title', ''), nom, f)
+            add('Mods', 'OK', nom, '%s %s · %s téléchargements sur Modrinth%s' % (proj.get('title'), info[1], format(proj.get('downloads', 0), ',').replace(',', ' '), recent), f, d['launcher'])
+            if RE_INTERDIT.search(proj.get('slug', '')): add('Mods', 'ORANGE', 'Mod interdit sur la plupart des serveurs : ' + proj.get('title', ''), nom, f, d['launcher'])
             continue
         niv, rs, mid = analyse_jar(f, nom)
         src = "pas sur Modrinth (peut venir de CurseForge ou d'ailleurs)"
         if proj: src = 'sur Modrinth mais peu téléchargé : %s (%d)' % (proj.get('title'), proj.get('downloads', 0))
         titre = nom + ('  [id: %s]' % mid if mid else '')
-        if niv: add('Mods', niv, titre, rs + ' · ' + src + recent, f)
-        else: add('Mods', 'INFO', titre, src + ', rien de suspect dedans' + recent, f)
+        if niv: add('Mods', niv, titre, rs + ' · ' + src + recent, f, d['launcher'])
+        else: add('Mods', 'INFO', titre, src + ', rien de suspect dedans' + recent, f, d['launcher'])
     entetes_jusqua(len(dossiers))
 
 # ---------------- launchers et clients ----------------
@@ -835,7 +835,7 @@ def scan_usb():
                 elif re.search(r'(?i)\.(exe|dll|so|sh|appimage|bat|py)$', f):
                     if RE_NOM.search(f) or RE_PROG.search(f): sus = True; add('Usb', 'ORANGE', 'Programme suspect sur la clé : ' + f, p, p)
                     elif ne < 30: ne += 1; add('Usb', 'INFO', 'Programme sur la clé : ' + f, p, p)
-        RES.insert(avant, ('Usb', 'ORANGE' if sus else 'INFO', 'Clé USB montée : ' + mp, '%s (%s) · %d fichier(s), %d jar(s)' % (dev, fs, nf, nj), mp))
+        RES.insert(avant, ('Usb', 'ORANGE' if sus else 'INFO', 'Clé USB montée : ' + mp, '%s (%s) · %d fichier(s), %d jar(s)' % (dev, fs, nf, nj), mp, ''))
     # journal du noyau : branchements / debranchements
     log = ''
     for cmd in (['journalctl', '-k', '--since', '-%dh' % HEURES, '-o', 'short-unix', '--no-pager', '-q'], ['dmesg', '--time-format', 'iso']):
@@ -1035,6 +1035,10 @@ section{flex:1;display:flex;flex-direction:column;min-width:0}
 .seg{display:flex;border:1px solid var(--line2);border-radius:4px;overflow:hidden}
 .seg button{height:28px;padding:0 11px;border:0;border-right:1px solid var(--line2);background:none;color:var(--mut);font:inherit;font-size:12px;cursor:pointer}
 .seg button:last-child{border-right:0}.seg button:hover{color:var(--txt)}.seg button.on{background:var(--hov);color:var(--fort)}
+.puces{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px}
+.puce{height:26px;padding:0 10px;border-radius:4px;border:1px solid var(--line2);background:none;color:var(--mut);font:inherit;font-size:12px;cursor:pointer}
+.puce b{font:500 11px var(--mono);margin-left:6px;color:var(--fai)}
+.puce:hover{color:var(--txt);border-color:var(--mut)}.puce.on{color:var(--fort);border-color:var(--acc);background:var(--hov)}
 .btn{height:30px;padding:0 12px;border-radius:4px;border:1px solid var(--line2);background:var(--pan);color:var(--txt);font:inherit;font-size:12px;cursor:pointer}
 .btn:hover{border-color:var(--mut)}
 #liste{flex:1;overflow:auto;padding:18px 20px 40px}
@@ -1083,7 +1087,7 @@ footer{display:flex;gap:20px;padding:7px 20px;color:var(--fai);font:11px var(--m
 const D=__DATA__;
 const LV={ROUGE:'ALERTE',ORANGE:'À VÉRIFIER',OK:'OK',INFO:'INFO'};
 const NOMS={};for(const c of D.cats)NOMS[c[0]]=c[1];
-let cat='Resume',niv='',q='';
+let cat='Resume',niv='',q='',lanc='';
 const $=s=>document.querySelector(s);
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
 const compte=(c,n)=>D.res.filter(r=>(!c||r[0]===c)&&r[1]===n).length;
@@ -1109,8 +1113,17 @@ function liste(){const ql=q.toLowerCase();let h='';
   h='<div class="stats"><div class="stat r"><b>'+compte(null,'ROUGE')+'</b><span>Alertes</span></div><div class="stat o"><b>'+compte(null,'ORANGE')+'</b><span>À vérifier</span></div><div class="stat ok"><b>'+compte(null,'OK')+'</b><span>Contrôles OK</span></div><div class="stat"><b>'+D.res.length+'</b><span>Entrées</span></div></div>';
   const imp=D.res.filter(r=>(r[1]==='ROUGE'||r[1]==='ORANGE')&&ok(r)).sort((a,b)=>(a[1]==='ROUGE'?0:1)-(b[1]==='ROUGE'?0:1));
   h+='<h2>Points à examiner avec le joueur<small>'+imp.length+'</small></h2>'+tableau(imp,true,'Aucune alerte ni point à vérifier'+(niv?' avec ce filtre':'')+'.')}
- else{const rs=D.res.filter(r=>r[0]===cat&&ok(r));h='<h2>'+esc(NOMS[cat]||cat)+'<small>'+rs.length+' entrée(s)</small></h2>'+tableau(rs,false,'Rien à afficher avec ce filtre.')}
+ else{
+  let puces='';
+  if(cat==='Mods'){
+   const g={};for(const r of D.res)if(r[0]==='Mods'&&r[5]){if(!(r[5] in g))g[r[5]]=0;if(/\.jar$/i.test(r[4]||'')&&!/^(▸|Jar modifié|Mod interdit)/.test(r[2]))g[r[5]]++}
+   const noms=Object.keys(g);if(lanc&&!(lanc in g))lanc='';
+   if(noms.length){let tot=0;for(const k of noms)tot+=g[k];
+    puces='<div class="puces">'+[['','Tous les launchers',tot]].concat(noms.map(k=>[k,k,g[k]])).map(x=>'<button class="puce'+(x[0]===lanc?' on':'')+'" data-l="'+esc(x[0])+'">'+esc(x[1])+'<b>'+x[2]+'</b></button>').join('')+'</div>'}}
+  const rs=D.res.filter(r=>r[0]===cat&&ok(r)&&(cat!=='Mods'||!lanc||r[5]===lanc));
+  h='<h2>'+esc(NOMS[cat]||cat)+'<small>'+rs.length+' entrée(s)</small></h2>'+puces+tableau(rs,false,'Rien à afficher avec ce filtre.')}
  $('#liste').innerHTML=h;$('#liste').scrollTop=0;
+ for(const b of document.querySelectorAll('.puce'))b.onclick=()=>{lanc=b.dataset.l;liste()};
  for(const e of document.querySelectorAll('.ch'))e.onclick=()=>copier(e.dataset.p,'Chemin copié')}
 const v=D.verdict;$('#verd').className='verd '+v[2];$('#verd').innerHTML='<small>Verdict</small><b>'+esc(v[0])+'</b><span>'+esc(v[1])+'</span>';
 $('#meta').innerHTML=[['Machine',D.pc],['Session',D.user],['Date',D.date],['Droits',D.root?'root':'utilisateur (incomplet)'],['Version','v'+D.version]].map(x=>'<div><small>'+x[0]+'</small><code>'+esc(x[1])+'</code></div>').join('');

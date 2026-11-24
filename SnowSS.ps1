@@ -48,6 +48,7 @@ $script:VerdictTexte   = ''
 $script:ScanEnCours    = $false
 $script:Annule         = $false
 $script:UI             = $null
+$script:FiltreLauncher = ''
 
 $SS_Categories = [ordered]@{
     Resume     = 'Résumé'
@@ -82,8 +83,8 @@ $SS_RegexJeu       = '(?i)minecraft|fabric|forge|quilt|lunar|feather|badlion|lab
 #  Outils
 # =====================================================================
 function Add-Res {
-    param([string]$Cat, [string]$Niveau, [string]$Titre, [string]$Detail = '', [string]$Chemin = '')
-    $script:SS_Resultats.Add([pscustomobject]@{ Cat = $Cat; Niveau = $Niveau; Titre = $Titre; Detail = $Detail; Chemin = $Chemin })
+    param([string]$Cat, [string]$Niveau, [string]$Titre, [string]$Detail = '', [string]$Chemin = '', [string]$Groupe = '')
+    $script:SS_Resultats.Add([pscustomobject]@{ Cat = $Cat; Niveau = $Niveau; Titre = $Titre; Detail = $Detail; Chemin = $Chemin; Groupe = $Groupe })
     if (-not $script:UI) {
         $c = 'Gray'
         if ($Niveau -eq 'ROUGE') { $c = 'Red' } elseif ($Niveau -eq 'ORANGE') { $c = 'Yellow' } elseif ($Niveau -eq 'OK') { $c = 'DarkGreen' }
@@ -874,10 +875,10 @@ function Invoke-ScanMods {
         param($d)
         if ($d.PSObject.Properties['Fait']) { return }
         $d | Add-Member -NotePropertyName Fait -NotePropertyValue $true
-        Add-Res Mods $d.Entete[0] ('▸ ' + $d.Entete[1]) $d.Chemin $d.Chemin
+        Add-Res Mods $d.Entete[0] ('▸ ' + $d.Entete[1]) $d.Chemin $d.Chemin $d.Launcher
         foreach ($a in $d.Alertes) {
-            if ($d.Packs) { Add-Res Mods ORANGE 'Pack de textures X-Ray' ('[' + $d.Etiquette + '] ' + $a.Name) $a.FullName }
-            else { Add-Res Mods ORANGE 'Fichier bizarre dans un dossier mods' ('[' + $d.Etiquette + '] ' + $a.Name) $a.FullName }
+            if ($d.Packs) { Add-Res Mods ORANGE 'Pack de textures X-Ray' ('[' + $d.Etiquette + '] ' + $a.Name) $a.FullName $d.Launcher }
+            else { Add-Res Mods ORANGE 'Fichier bizarre dans un dossier mods' ('[' + $d.Etiquette + '] ' + $a.Name) $a.FullName $d.Launcher }
         }
     }
     # affiche dans l'ordre tous les en-tetes jusqu'au dossier n (les dossiers vides ou de packs restent a leur place)
@@ -902,14 +903,14 @@ function Invoke-ScanMods {
         $recent = ' · [' + $j.Dossier.Etiquette + ']'
         if ($j.Modif -ge $script:SS_Depuis) { $recent = (' · modifié le {0:dd/MM HH:mm}' -f $j.Modif) + $recent }
         if ($j.Jeu -and $script:SS_LancementJeu -and $j.Modif -gt $script:SS_LancementJeu) {
-            Add-Res Mods ORANGE ('Jar modifié APRÈS le lancement du jeu : ' + $j.Nom) ('modifié le {0}' -f (Format-Date $j.Modif)) $j.Chemin
+            Add-Res Mods ORANGE ('Jar modifié APRÈS le lancement du jeu : ' + $j.Nom) ('modifié le {0}' -f (Format-Date $j.Modif)) $j.Chemin $j.Dossier.Launcher
         }
         $info = $null
         if ($j.Sha1 -and $modrinth.ContainsKey($j.Sha1)) { $info = $modrinth[$j.Sha1] }
         $connu = ($info -and $info.Projet)
         if ($connu -and $info.Projet.downloads -ge $SS_SeuilModrinth) {
-            Add-Res Mods OK $j.Nom ('{0} {1} · {2:N0} téléchargements sur Modrinth{3}' -f $info.Projet.title, $info.Version, $info.Projet.downloads, $recent) $j.Chemin
-            if ($info.Projet.slug -match $SS_RegexInterdit) { Add-Res Mods ORANGE ('Mod interdit sur la plupart des serveurs : ' + $info.Projet.title) $j.Nom $j.Chemin }
+            Add-Res Mods OK $j.Nom ('{0} {1} · {2:N0} téléchargements sur Modrinth{3}' -f $info.Projet.title, $info.Version, $info.Projet.downloads, $recent) $j.Chemin $j.Dossier.Launcher
+            if ($info.Projet.slug -match $SS_RegexInterdit) { Add-Res Mods ORANGE ('Mod interdit sur la plupart des serveurs : ' + $info.Projet.title) $j.Nom $j.Chemin $j.Dossier.Launcher }
             continue
         }
         $an = Get-AnalyseJar $j.Chemin $j.Nom
@@ -917,8 +918,8 @@ function Invoke-ScanMods {
         if ($connu) { $source = ('sur Modrinth mais peu téléchargé : {0} ({1:N0})' -f $info.Projet.title, $info.Projet.downloads) }
         $titre = $j.Nom
         if ($an.ModId) { $titre += "  [id: $($an.ModId)]" }
-        if ($an.Niveau) { Add-Res Mods $an.Niveau $titre ($an.Raisons + ' · ' + $source + $recent) $j.Chemin }
-        else { Add-Res Mods INFO $titre ($source + ', rien de suspect dedans' + $recent) $j.Chemin }
+        if ($an.Niveau) { Add-Res Mods $an.Niveau $titre ($an.Raisons + ' · ' + $source + $recent) $j.Chemin $j.Dossier.Launcher }
+        else { Add-Res Mods INFO $titre ($source + ', rien de suspect dedans' + $recent) $j.Chemin $j.Dossier.Launcher }
     }
     & $entetesJusqua $dossiers.Count
 }
@@ -1832,11 +1833,14 @@ function Show-Categorie {
     $memeCat = ($script:CatActive -eq $Cle)
     $script:CatActive = $Cle
     $script:NbAffiche = $script:SS_Resultats.Count
+    Update-FiltreLaunchers $Cle
+    $filtre = $(if ($Cle -eq 'Mods') { "$($script:FiltreLauncher)" } else { '' })
     $rouges = New-Object System.Collections.Generic.List[object]
     $oranges = New-Object System.Collections.Generic.List[object]
     $autres = New-Object System.Collections.Generic.List[object]
     foreach ($x in $script:SS_Resultats) {
         if ($Cle -ne 'Resume' -and $x.Cat -ne $Cle) { continue }
+        if ($filtre -and $x.Groupe -ne $filtre) { continue }
         if ($x.Niveau -eq 'ROUGE') { $rouges.Add($x) }
         elseif ($x.Niveau -eq 'ORANGE') { $oranges.Add($x) }
         elseif ($Cle -ne 'Resume') { $autres.Add($x) }
@@ -1870,6 +1874,39 @@ function Show-Categorie {
     if (-not $memeCat) { $script:UI.Defile.ScrollToTop() }
     $script:ChangeNav = $true
     try { $script:UI.Nav[$Cle].Bouton.IsChecked = $true } finally { $script:ChangeNav = $false }
+}
+
+function Update-FiltreLaunchers {
+    # Boutons « Tous / Modrinth App / Launcher officiel... » au-dessus de la liste des mods
+    param([string]$Cle)
+    $panneau = $script:UI.FiltreLaunchers
+    if (-not $panneau) { return }
+    $panneau.Children.Clear()
+    if ($Cle -ne 'Mods') { $panneau.Visibility = 'Collapsed'; return }
+    $groupes = [ordered]@{}
+    foreach ($x in $script:SS_Resultats) {
+        if ($x.Cat -ne 'Mods' -or -not $x.Groupe) { continue }
+        if (-not $groupes.Contains($x.Groupe)) { $groupes[$x.Groupe] = 0 }
+        if ("$($x.Chemin)" -like '*.jar' -and $x.Titre -notlike '▸*' -and $x.Titre -notlike 'Jar modifié*' -and $x.Titre -notlike 'Mod interdit*') { $groupes[$x.Groupe]++ }
+    }
+    if ($script:FiltreLauncher -and -not $groupes.Contains($script:FiltreLauncher)) { $script:FiltreLauncher = '' }
+    if ($groupes.Count -eq 0) { $panneau.Visibility = 'Collapsed'; return }
+    $panneau.Visibility = 'Visible'
+    $total = 0; foreach ($v in $groupes.Values) { $total += $v }
+    $style = $script:UI.Fenetre.FindResource('Puce')
+    $choix = @(, @('', 'Tous les launchers', $total))
+    foreach ($g in $groupes.Keys) { $choix += , @($g, $g, $groupes[$g]) }
+    foreach ($c in $choix) {
+        $b = New-Object System.Windows.Controls.Button
+        $b.Style = $style
+        $b.Tag = $c[0]
+        $b.Content = ('{0}  {1}' -f $c[1], $c[2])
+        if ("$($script:FiltreLauncher)" -eq $c[0]) {
+            $b.Background = (New-Pinceau '#1A1D23'); $b.BorderBrush = $script:Pinceaux.ACCENT.C; $b.Foreground = (New-Pinceau '#F1F3F6')
+        }
+        $b.Add_Click({ param($s, $e) $script:FiltreLauncher = [string]$s.Tag; Show-Categorie 'Mods'; $script:UI.Defile.ScrollToTop() })
+        [void]$panneau.Children.Add($b)
+    }
 }
 
 function Open-Emplacement {
@@ -1986,6 +2023,30 @@ $SS_Xaml = @'
       <Setter Property="BorderBrush" Value="#E8EAED"/>
       <Setter Property="Foreground" Value="#0C0D10"/>
       <Setter Property="FontWeight" Value="SemiBold"/>
+    </Style>
+
+    <Style x:Key="Puce" TargetType="Button">
+      <Setter Property="Foreground" Value="#7B818C"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderBrush" Value="#2C3038"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Margin" Value="0,0,6,6"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1" CornerRadius="4" Padding="10,4">
+              <ContentPresenter VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bd" Property="BorderBrush" Value="#7B818C"/>
+                <Setter Property="Foreground" Value="#D7DAE0"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
     </Style>
 
     <Style x:Key="BtnFenetre" TargetType="Button">
@@ -2120,6 +2181,7 @@ $SS_Xaml = @'
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
           </Grid.RowDefinitions>
@@ -2181,7 +2243,10 @@ $SS_Xaml = @'
           </DockPanel>
 
           <!-- Resultats -->
-          <ScrollViewer x:Name="Defile" Grid.Row="3" VerticalScrollBarVisibility="Auto">
+          <!-- Filtre par launcher (catégorie Mods) -->
+          <WrapPanel x:Name="FiltreLaunchers" Grid.Row="3" Margin="0,0,0,8" Visibility="Collapsed"/>
+
+          <ScrollViewer x:Name="Defile" Grid.Row="4" VerticalScrollBarVisibility="Auto">
             <Border VerticalAlignment="Top" BorderBrush="#23262D" BorderThickness="1,1,1,0" CornerRadius="4" Margin="0,0,4,0">
               <ItemsControl x:Name="Liste">
                 <ItemsControl.ItemTemplate>
@@ -2219,7 +2284,7 @@ $SS_Xaml = @'
           </ScrollViewer>
 
           <!-- Pied -->
-          <DockPanel Grid.Row="4" Margin="0,12,0,0">
+          <DockPanel Grid.Row="5" Margin="0,12,0,0">
             <TextBlock DockPanel.Dock="Right" Text="double-clic : ouvrir l'emplacement · clic droit : copier" FontSize="11" Foreground="#565B65"/>
             <TextBlock x:Name="InfoRapport" FontFamily="{StaticResource Mono}" FontSize="11" Foreground="#565B65" TextTrimming="CharacterEllipsis" Margin="0,0,20,0"/>
           </DockPanel>
@@ -2248,7 +2313,7 @@ function New-Interface {
     $ui = @{ Fenetre = $w }
     foreach ($nom in 'Racine', 'BarreTitre', 'SousTitre', 'InfoPc', 'BadgeAdmin', 'IconeAdmin', 'TexteAdmin', 'BtnMin', 'BtnFermer',
                      'Nav', 'Rond', 'IconeVerdict', 'Verdict', 'SousVerdict', 'BarreFond', 'Barre', 'Statut',
-                     'StatRouge', 'StatOrange', 'StatMods', 'StatUsb', 'StatUsbSous', 'TitreListe', 'CompteListe', 'InfoVersion',
+                     'StatRouge', 'StatOrange', 'StatMods', 'StatUsb', 'StatUsbSous', 'TitreListe', 'CompteListe', 'InfoVersion', 'FiltreLaunchers',
                      'Defile', 'Liste', 'BtnCopier', 'BtnOuvrir', 'BtnRelancer', 'InfoRapport') {
         $ui[$nom] = $w.FindName($nom)
     }
@@ -2339,6 +2404,7 @@ function New-Interface {
         Start-Scan
         if ($env:SNOWSS_CAPTURE) {
             try {
+                if ($env:SNOWSS_CAPTURE_FILTRE) { $script:FiltreLauncher = $env:SNOWSS_CAPTURE_FILTRE }
                 if ($env:SNOWSS_CAPTURE_CAT) { Show-Categorie $env:SNOWSS_CAPTURE_CAT }
                 Invoke-PompeUi
                 $el = $script:UI.Fenetre.Content
