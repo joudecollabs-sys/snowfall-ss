@@ -72,6 +72,8 @@ $SS_PaquetsCheat = @(
     'me/deftware/', 'dev/lvstrng/argon/', 'net/impactclient/'
 )
 $SS_RegexModule    = '(?i)(^|/)(KillAura|TriggerBot|AimAssist|AimBot|AutoClicker|CrystalAura|AutoCrystal|AnchorAura|AutoAnchor|AutoHitCrystal|AutoDoubleHand|AutoInventoryTotem|HoverTotem|Scaffold|Nuker|Reach|Velocity|AntiKnockback|NoFall|Flight|Criticals|Tracers|XRay|SelfDestruct|AutoPot|ShieldDisabler|AutoMace|ElytraFly|LegitTotem|AutoWeb)(Module|Hack|Feature|Mod)?\.class$'
+$SS_RegexChargeur  = '(?i)(^|/)(PayloadLoader|PayloadSignature|PayloadUpdater|PayloadCache|PayloadDownloader|MemoryFs|MemoryFileSystem|MemoryClassLoader|InMemoryClassLoader|InMemoryJar\w*|RemoteLoader|RemoteClassLoader|Stage2\w*)(\$[^/]*)?\.class$'
+$SS_RegexDescChargeur = '(?i)(payload|fetch(es)? and loads?|downloads? (and loads? )?(the )?client|loads? the client|client itself lives|inject(s|ed|or)?\b)'
 $SS_RegexStructure = '(?i)/modules?/(combat|movement|render|player|misc|world|exploit|ghost|crystal)/'
 $SS_RegexNom       = '(?i)(meteor|wurst|aristois|liquidbounce|rusherhack|thunderhack|bleachhack|kami|salhack|inertia|boze|doomsday|argon|prestige|vape|phobos|konas|earthhack|oyvey|shoreline|nullpoint|cornos|coffee.?client|auto.?click|killaura|trigger.?bot|aim.?assist|ghost.?client|cheat|hack|x-?ray|injector|self.?destruct)'
 $SS_RegexInterdit  = '(?i)(x-?ray|baritone|freecam|seed-?cracker|auto-?click|meteor|wurst|elytra-?fly|auto-?totem)'
@@ -174,6 +176,8 @@ function Read-Archive {
                 if ($Res.Modules -notcontains $nom) { $Res.Modules += $nom }
             }
             if ($n -match $SS_RegexStructure) { $Res.Structure++ }
+            if ($n -match $SS_RegexChargeur) { $c = ($Matches[2]); if ($Res.Chargeur -notcontains $c) { $Res.Chargeur += $c } }
+            if ($n.StartsWith('imgui/')) { $Res.ImGui = $true }
             continue
         }
         if ($Profondeur -eq 0) {
@@ -183,6 +187,8 @@ function Read-Archive {
                 if ($m.Success) { $Res.ModId = $m.Groups[1].Value }
                 $m = [regex]::Match($txt, '"name"\s*:\s*"([^"]+)"')
                 if ($m.Success) { $Res.NomMod = $m.Groups[1].Value }
+                $m = [regex]::Match($txt, '"description"\s*:\s*"([^"]*)"')
+                if ($m.Success -and $m.Groups[1].Value -match $SS_RegexDescChargeur) { $Res.DescChargeur = $m.Groups[1].Value }
                 continue
             }
             if ($n -eq 'META-INF/mods.toml' -or $n -eq 'META-INF/neoforge.mods.toml') {
@@ -205,6 +211,7 @@ function Read-Archive {
                 continue
             }
         }
+        if ($n.EndsWith('.jar') -and $n -match '(?i)imgui-java') { $Res.ImGui = $true }
         if ($n.EndsWith('.jar') -and $Profondeur -lt 2) {
             try {
                 $ms = New-Object IO.MemoryStream
@@ -223,7 +230,7 @@ function Test-Jar {
     $res = [pscustomobject]@{
         ModId = $null; NomMod = $null; Agent = $false; Erreur = $null
         Classes = 0; Obfusque = 0; Unicode = 0; Structure = 0
-        Paquets = @(); Modules = @()
+        Paquets = @(); Modules = @(); Chargeur = @(); ImGui = $false; DescChargeur = $null
     }
     try { $zip = [IO.Compression.ZipFile]::OpenRead($Chemin) } catch { $res.Erreur = 'jar illisible ou corrompu'; return $res }
     try { Read-Archive $zip $res 0 } finally { $zip.Dispose() }
@@ -247,6 +254,14 @@ function Get-AnalyseJar {
     if ($a.Classes -ge 30 -and ($a.Obfusque / $a.Classes) -ge 0.4) {
         if (-not $niveau) { $niveau = 'ORANGE' }; $r.Add(('code obfusqué ({0:N0} % des classes)' -f (100 * $a.Obfusque / $a.Classes)))
     }
+    if ($a.Chargeur.Count -gt 0 -or $a.DescChargeur) {
+        $preuves = @()
+        if ($a.Chargeur.Count) { $preuves += ('classes ' + ($a.Chargeur -join ', ')) }
+        if ($a.DescChargeur) { $preuves += ('sa description : « ' + $(if ($a.DescChargeur.Length -gt 120) { $a.DescChargeur.Substring(0, 120) + '…' } else { $a.DescChargeur }) + ' »') }
+        if ($a.ImGui) { $preuves += 'contient ImGui' }
+        if (($a.Chargeur.Count -and $a.DescChargeur) -or $a.ImGui -or ($a.Classes -ge 30 -and ($a.Obfusque / $a.Classes) -ge 0.4)) { $niveau = 'ROUGE' } elseif (-not $niveau) { $niveau = 'ORANGE' }
+        $r.Add('CHARGEUR DE CLIENT CACHÉ : le vrai code est téléchargé au lancement et chargé en mémoire, il n''est pas dans ce jar (' + ($preuves -join ' ; ') + ')')
+    } elseif ($a.ImGui) { if (-not $niveau) { $niveau = 'ORANGE' }; $r.Add('contient ImGui : menu en surimpression utilisé par beaucoup de clients de triche') }
     if ($a.Unicode -gt 0) { if (-not $niveau) { $niveau = 'ORANGE' }; $r.Add('noms de classes avec des caractères bizarres') }
     if ($a.Agent) { if (-not $niveau) { $niveau = 'ORANGE' }; $r.Add('jar fait pour être injecté (agent Java)') }
     if ($a.Erreur) { if (-not $niveau) { $niveau = 'ORANGE' }; $r.Add($a.Erreur) }

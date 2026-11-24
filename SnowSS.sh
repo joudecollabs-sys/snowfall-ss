@@ -28,7 +28,7 @@ exec python3 - "$@" <<'SNOWSS_FIN_PYTHON'
 import os, sys, re, io, json, glob, time, zipfile, hashlib, datetime, subprocess, pwd, platform, socket, shutil
 import urllib.request, urllib.parse
 
-VERSION = '1.3'
+VERSION = '1.4'
 HEURES = 48
 SEUIL_MODRINTH = 2000
 MIN_AVANT_SCAN = 30
@@ -84,6 +84,8 @@ PAQUETS = ['meteordevelopment/', 'net/wurstclient/', 'net/ccbluex/', 'org/rusher
            'bleach/hack/', 'org/bleachhack/', 'me/zeroeightsix/kami/', 'com/lambda/client/', 'dev/boze/',
            'me/earth/earthhack/', 'me/alpha432/oyvey/', 'me/deftware/', 'dev/lvstrng/argon/', 'net/impactclient/']
 RE_MODULE = re.compile(r'(?i)(^|/)(KillAura|TriggerBot|AimAssist|AimBot|AutoClicker|CrystalAura|AutoCrystal|AnchorAura|AutoAnchor|AutoHitCrystal|AutoDoubleHand|AutoInventoryTotem|HoverTotem|Scaffold|Nuker|Reach|Velocity|AntiKnockback|NoFall|Flight|Criticals|Tracers|XRay|SelfDestruct|AutoPot|ShieldDisabler|AutoMace|ElytraFly|LegitTotem|AutoWeb)(Module|Hack|Feature|Mod)?\.class$')
+RE_CHARGEUR = re.compile(r'(?i)(^|/)(PayloadLoader|PayloadSignature|PayloadUpdater|PayloadCache|PayloadDownloader|MemoryFs|MemoryFileSystem|MemoryClassLoader|InMemoryClassLoader|InMemoryJar\w*|RemoteLoader|RemoteClassLoader|Stage2\w*)(\$[^/]*)?\.class$')
+RE_DESC_CHARGEUR = re.compile(r'(?i)(payload|fetch(es)? and loads?|downloads? (and loads? )?(the )?client|loads? the client|client itself lives|inject(s|ed|or)?\b)')
 RE_STRUCT = re.compile(r'(?i)/modules?/(combat|movement|render|player|misc|world|exploit|ghost|crystal)/')
 RE_NOM = re.compile(r'(?i)(meteor|wurst|aristois|liquidbounce|rusherhack|thunderhack|bleachhack|kami|salhack|inertia|boze|doomsday|argon|prestige|vape|phobos|konas|earthhack|oyvey|shoreline|nullpoint|cornos|coffee.?client|auto.?click|killaura|trigger.?bot|aim.?assist|ghost.?client|cheat|hack|x-?ray|injector|self.?destruct)')
 RE_INTERDIT = re.compile(r'(?i)(x-?ray|baritone|freecam|seed-?cracker|auto-?click|meteor|wurst|elytra-?fly|auto-?totem)')
@@ -131,6 +133,9 @@ def lire_zip(z, r, prof):
             m = RE_MODULE.search(n)
             if m and m.group(2) not in r['mod']: r['mod'].append(m.group(2))
             if RE_STRUCT.search(n): r['struct'] += 1
+            mc = RE_CHARGEUR.search(n)
+            if mc and mc.group(2) not in r['charg']: r['charg'].append(mc.group(2))
+            if n.startswith('imgui/'): r['imgui'] = True
             continue
         if prof == 0:
             try:
@@ -138,6 +143,8 @@ def lire_zip(z, r, prof):
                     t = z.read(n).decode('utf-8', 'replace')
                     m = re.search(r'"id"\s*:\s*"([^"]+)"', t); r['id'] = r['id'] or (m.group(1) if m else None)
                     m = re.search(r'"name"\s*:\s*"([^"]+)"', t); r['nom'] = r['nom'] or (m.group(1) if m else None)
+                    m = re.search(r'"description"\s*:\s*"([^"]*)"', t)
+                    if m and RE_DESC_CHARGEUR.search(m.group(1)): r['desc'] = m.group(1)
                     continue
                 if n in ('META-INF/mods.toml', 'META-INF/neoforge.mods.toml'):
                     t = z.read(n).decode('utf-8', 'replace')
@@ -152,12 +159,13 @@ def lire_zip(z, r, prof):
                     continue
             except Exception:
                 pass
+        if n.endswith('.jar') and 'imgui-java' in n.lower(): r['imgui'] = True
         if n.endswith('.jar') and prof < 2:
             try: lire_zip(zipfile.ZipFile(io.BytesIO(z.read(n))), r, prof + 1)
             except Exception: pass
 
 def analyse_jar(chemin, nom):
-    r = {'id': None, 'nom': None, 'agent': False, 'classes': 0, 'obf': 0, 'uni': 0, 'struct': 0, 'paq': [], 'mod': [], 'err': None}
+    r = {'id': None, 'nom': None, 'agent': False, 'classes': 0, 'obf': 0, 'uni': 0, 'struct': 0, 'paq': [], 'mod': [], 'err': None, 'charg': [], 'imgui': False, 'desc': None}
     try:
         with zipfile.ZipFile(chemin) as z: lire_zip(z, r, 0)
     except Exception:
@@ -171,6 +179,15 @@ def analyse_jar(chemin, nom):
     elif r['mod']: monte('ORANGE'); rs.append('nom de classe suspect : ' + ', '.join(r['mod']))
     elif r['struct'] >= 3: monte('ORANGE'); rs.append('structure de client de triche (modules/combat...)')
     if r['classes'] >= 30 and r['obf'] / float(r['classes']) >= 0.4: monte('ORANGE'); rs.append('code obfusqué (%d %% des classes)' % (100 * r['obf'] / r['classes']))
+    if r['charg'] or r['desc']:
+        pr = []
+        if r['charg']: pr.append('classes ' + ', '.join(r['charg']))
+        if r['desc']: pr.append('sa description : « ' + (r['desc'][:120] + '…' if len(r['desc']) > 120 else r['desc']) + ' »')
+        if r['imgui']: pr.append('contient ImGui')
+        if (r['charg'] and r['desc']) or r['imgui'] or (r['classes'] >= 30 and r['obf'] / float(r['classes']) >= 0.4): niv = 'ROUGE'
+        else: monte('ORANGE')
+        rs.append("CHARGEUR DE CLIENT CACHÉ : le vrai code est téléchargé au lancement et chargé en mémoire, il n'est pas dans ce jar (" + ' ; '.join(pr) + ')')
+    elif r['imgui']: monte('ORANGE'); rs.append('contient ImGui : menu en surimpression utilisé par beaucoup de clients de triche')
     if r['uni']: monte('ORANGE'); rs.append('noms de classes avec des caractères bizarres')
     if r['agent']: monte('ORANGE'); rs.append('jar fait pour être injecté (agent Java)')
     if r['err']: monte('ORANGE'); rs.append(r['err'])
