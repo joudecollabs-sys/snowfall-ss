@@ -1194,7 +1194,7 @@ function Update-Verdict {
         $script:UI.Verdict.Text = $titre
         $script:UI.Verdict.Foreground = $p.C
         $script:UI.SousVerdict.Text = $sous
-        $script:UI.Rond.Background = $p.F
+        $script:UI.Rond.Background = $p.C
         $script:UI.IconeVerdict.Text = $glyphe
         $script:UI.IconeVerdict.Foreground = $p.C
         $script:UI.Barre.Background = $p.C
@@ -1283,6 +1283,8 @@ $SS_Icones = @{
     Programmes = 0xE71D; Usb = 0xE88E; Fichiers = 0xE8A5; Corbeille = 0xE74D
 }
 
+$SS_NomsNiveaux = @{ ROUGE = 'ALERTE'; ORANGE = 'À VÉRIFIER'; OK = 'OK'; INFO = 'INFO' }
+
 function Invoke-PompeUi {
     $frame = New-Object System.Windows.Threading.DispatcherFrame
     $cb = [System.Windows.Threading.DispatcherOperationCallback] { param($f) $f.Continue = $false; return $null }
@@ -1303,16 +1305,9 @@ function Update-Navigation {
         $n = $script:UI.Nav[$cle]
         $r = Get-Compte $cle ROUGE
         $o = Get-Compte $cle ORANGE
-        if ($r -gt 0) { $niv = 'ROUGE' } elseif ($o -gt 0) { $niv = 'ORANGE' } else { $niv = $null }
-        if ($niv) {
-            $p = $script:Pinceaux[$niv]
-            $n.Pastille.Visibility = 'Visible'
-            $n.Pastille.Background = $p.F
-            $n.Compte.Foreground = $p.C
-            $n.Compte.Text = [string]($r + $o)
-        } else {
-            $n.Pastille.Visibility = 'Collapsed'
-        }
+        $n.R.Text = [string]$r; $n.R.Visibility = $(if ($r -gt 0) { 'Visible' } else { 'Collapsed' })
+        $n.O.Text = [string]$o; $n.O.Visibility = $(if ($o -gt 0) { 'Visible' } else { 'Collapsed' })
+        $n.Z.Visibility = $(if ($r -eq 0 -and $o -eq 0) { 'Visible' } else { 'Collapsed' })
     }
     $script:UI.StatRouge.Text = [string](Get-Compte Resume ROUGE)
     $script:UI.StatOrange.Text = [string](Get-Compte Resume ORANGE)
@@ -1347,18 +1342,21 @@ function Show-Categorie {
     $items = New-Object System.Collections.ObjectModel.ObservableCollection[object]
     foreach ($r in $rows) {
         $p = $script:Pinceaux[$r.Niveau]
-        $titre = $r.Titre
-        if ($Cle -eq 'Resume' -and $r.Cat -ne 'Resume') { $titre = $SS_Categories[$r.Cat] + '  ›  ' + $titre }
+        $catTexte = ''; $catVis = 'Collapsed'
+        if ($Cle -eq 'Resume' -and $r.Cat -ne 'Resume') { $catTexte = $SS_Categories[$r.Cat]; $catVis = 'Visible' }
         $chemin = ''; $vis = 'Collapsed'
         if ($r.Chemin -and -not "$($r.Detail)".Contains($r.Chemin)) { $chemin = $r.Chemin; $vis = 'Visible' }
+        $barre = $script:Pinceaux.VIDE
+        if ($r.Niveau -eq 'ROUGE') { $barre = $p.C }
         $items.Add([pscustomobject]@{
-            Titre = $titre; Detail = "$($r.Detail)"; Chemin = $chemin; CheminVis = $vis
-            Couleur = $p.C; FondPill = $p.F; NiveauTexte = $r.Niveau; Source = $r
+            Titre = $r.Titre; Detail = "$($r.Detail)"; Chemin = $chemin; CheminVis = $vis
+            CatTexte = $catTexte; CatVis = $catVis; Barre = $barre
+            Couleur = $p.C; NiveauTexte = $SS_NomsNiveaux[$r.Niveau]; Source = $r
         })
     }
     $script:UI.Liste.ItemsSource = $items
-    $script:UI.TitreListe.Text = $SS_Categories[$Cle]
-    $script:UI.CompteListe.Text = ('{0} élément(s)' -f $rows.Count)
+    if ($Cle -eq 'Resume') { $script:UI.TitreListe.Text = 'POINTS À EXAMINER AVEC LE JOUEUR' } else { $script:UI.TitreListe.Text = $SS_Categories[$Cle].ToUpper() }
+    $script:UI.CompteListe.Text = ('{0} entrée(s)' -f $rows.Count)
     if (-not $memeCat) { $script:UI.Defile.ScrollToTop() }
     $script:ChangeNav = $true
     try { $script:UI.Nav[$Cle].Bouton.IsChecked = $true } finally { $script:ChangeNav = $false }
@@ -1388,31 +1386,55 @@ function Get-ItemSous {
 $SS_Xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="SnowFall SS" Width="1260" Height="820" MinWidth="1000" MinHeight="640"
+        Title="SnowFall SS" Width="1280" Height="820" MinWidth="1020" MinHeight="640"
         WindowStartupLocation="CenterScreen" WindowStyle="None" AllowsTransparency="True"
         Background="Transparent" ResizeMode="CanResizeWithGrip" FontFamily="Segoe UI"
-        TextOptions.TextFormattingMode="Display" UseLayoutRounding="True">
+        TextOptions.TextFormattingMode="Display" UseLayoutRounding="True" SnapsToDevicePixels="True">
   <Window.Resources>
     <FontFamily x:Key="Icones">Segoe Fluent Icons, Segoe MDL2 Assets</FontFamily>
+    <FontFamily x:Key="Mono">Cascadia Mono, Consolas</FontFamily>
+
+    <Style TargetType="ScrollBar">
+      <Setter Property="Width" Value="10"/>
+      <Setter Property="MinWidth" Value="10"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ScrollBar">
+            <Track x:Name="PART_Track" IsDirectionReversed="True">
+              <Track.Thumb>
+                <Thumb>
+                  <Thumb.Template>
+                    <ControlTemplate TargetType="Thumb">
+                      <Border Background="#2C3038" CornerRadius="2" Margin="3,2"/>
+                    </ControlTemplate>
+                  </Thumb.Template>
+                </Thumb>
+              </Track.Thumb>
+            </Track>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
 
     <Style x:Key="Nav" TargetType="RadioButton">
-      <Setter Property="Foreground" Value="#C3CEE0"/>
+      <Setter Property="Foreground" Value="#7B818C"/>
       <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="Margin" Value="0,0,0,4"/>
       <Setter Property="GroupName" Value="Nav"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="RadioButton">
-            <Border x:Name="Bd" Background="Transparent" CornerRadius="10" Padding="14,11">
+            <Border x:Name="Bd" Background="Transparent" BorderBrush="Transparent" BorderThickness="2,0,0,0" Padding="18,7,20,7">
               <ContentPresenter/>
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="Bd" Property="Background" Value="#131C2F"/>
+                <Setter TargetName="Bd" Property="Background" Value="#1A1D23"/>
+                <Setter Property="Foreground" Value="#D7DAE0"/>
               </Trigger>
               <Trigger Property="IsChecked" Value="True">
-                <Setter TargetName="Bd" Property="Background" Value="#1A2640"/>
-                <Setter Property="Foreground" Value="#FFFFFF"/>
+                <Setter TargetName="Bd" Property="Background" Value="#1A1D23"/>
+                <Setter TargetName="Bd" Property="BorderBrush" Value="#8AB4F8"/>
+                <Setter Property="Foreground" Value="#F1F3F6"/>
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -1421,25 +1443,25 @@ $SS_Xaml = @'
     </Style>
 
     <Style x:Key="Btn" TargetType="Button">
-      <Setter Property="Foreground" Value="#DCE6F5"/>
-      <Setter Property="Background" Value="#141E33"/>
-      <Setter Property="BorderBrush" Value="#24324F"/>
-      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="Foreground" Value="#D7DAE0"/>
+      <Setter Property="Background" Value="#111317"/>
+      <Setter Property="BorderBrush" Value="#2C3038"/>
+      <Setter Property="FontSize" Value="12.5"/>
       <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="Margin" Value="10,0,0,0"/>
+      <Setter Property="Margin" Value="8,0,0,0"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
             <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
-                    BorderThickness="1" CornerRadius="10" Padding="18,10">
+                    BorderThickness="1" CornerRadius="4" Padding="14,6">
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="Bd" Property="Opacity" Value="0.85"/>
+                <Setter TargetName="Bd" Property="BorderBrush" Value="#7B818C"/>
               </Trigger>
               <Trigger Property="IsPressed" Value="True">
-                <Setter TargetName="Bd" Property="Opacity" Value="0.7"/>
+                <Setter TargetName="Bd" Property="Opacity" Value="0.8"/>
               </Trigger>
               <Trigger Property="IsEnabled" Value="False">
                 <Setter TargetName="Bd" Property="Opacity" Value="0.4"/>
@@ -1450,27 +1472,27 @@ $SS_Xaml = @'
       </Setter>
     </Style>
     <Style x:Key="BtnPrimaire" TargetType="Button" BasedOn="{StaticResource Btn}">
-      <Setter Property="Background" Value="#6EC1FF"/>
-      <Setter Property="BorderBrush" Value="#6EC1FF"/>
-      <Setter Property="Foreground" Value="#06101F"/>
+      <Setter Property="Background" Value="#E8EAED"/>
+      <Setter Property="BorderBrush" Value="#E8EAED"/>
+      <Setter Property="Foreground" Value="#0C0D10"/>
       <Setter Property="FontWeight" Value="SemiBold"/>
     </Style>
 
     <Style x:Key="BtnFenetre" TargetType="Button">
-      <Setter Property="Foreground" Value="#8B9AB5"/>
+      <Setter Property="Foreground" Value="#7B818C"/>
       <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="Width" Value="40"/>
-      <Setter Property="Height" Value="32"/>
+      <Setter Property="Width" Value="46"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
-            <Border x:Name="Bd" Background="Transparent" CornerRadius="8">
-              <TextBlock Text="{TemplateBinding Content}" FontFamily="{StaticResource Icones}" FontSize="11"
+            <Border x:Name="Bd" Background="Transparent">
+              <TextBlock Text="{TemplateBinding Content}" FontFamily="{StaticResource Icones}" FontSize="10"
                          Foreground="{TemplateBinding Foreground}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="Bd" Property="Background" Value="#1A2540"/>
+                <Setter TargetName="Bd" Property="Background" Value="#1A1D23"/>
+                <Setter Property="Foreground" Value="#F1F3F6"/>
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -1478,68 +1500,92 @@ $SS_Xaml = @'
       </Setter>
     </Style>
 
-    <Style x:Key="Stat" TargetType="Border">
-      <Setter Property="Background" Value="#0F1729"/>
-      <Setter Property="BorderBrush" Value="#1C2740"/>
-      <Setter Property="BorderThickness" Value="1"/>
-      <Setter Property="CornerRadius" Value="14"/>
-      <Setter Property="Padding" Value="20,16"/>
-      <Setter Property="Margin" Value="0,0,12,0"/>
+    <Style x:Key="Etiquette" TargetType="TextBlock">
+      <Setter Property="FontSize" Value="10"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Foreground" Value="#565B65"/>
+    </Style>
+    <Style x:Key="ValeurMono" TargetType="TextBlock">
+      <Setter Property="FontFamily" Value="{StaticResource Mono}"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Foreground" Value="#D7DAE0"/>
+      <Setter Property="Margin" Value="0,2,0,0"/>
+    </Style>
+    <Style x:Key="Cellule" TargetType="Border">
+      <Setter Property="BorderBrush" Value="#23262D"/>
+      <Setter Property="BorderThickness" Value="0,0,1,0"/>
+      <Setter Property="Padding" Value="16,12"/>
+    </Style>
+    <Style x:Key="Chiffre" TargetType="TextBlock">
+      <Setter Property="FontFamily" Value="{StaticResource Mono}"/>
+      <Setter Property="FontSize" Value="24"/>
+      <Setter Property="Foreground" Value="#F1F3F6"/>
+      <Setter Property="Margin" Value="0,4,0,0"/>
+    </Style>
+    <Style x:Key="SousChiffre" TargetType="TextBlock">
+      <Setter Property="FontSize" Value="11"/>
+      <Setter Property="Foreground" Value="#565B65"/>
     </Style>
   </Window.Resources>
 
-  <Border x:Name="Racine" CornerRadius="18" Background="#0A0F1A" BorderBrush="#1E2A42" BorderThickness="1" Margin="14">
+  <Border x:Name="Racine" CornerRadius="6" Background="#0C0D10" BorderBrush="#2C3038" BorderThickness="1" Margin="14">
     <Border.Effect>
-      <DropShadowEffect BlurRadius="28" ShadowDepth="0" Opacity="0.6" Color="#000000"/>
+      <DropShadowEffect BlurRadius="24" ShadowDepth="0" Opacity="0.55" Color="#000000"/>
     </Border.Effect>
     <Grid>
       <Grid.RowDefinitions>
-        <RowDefinition Height="70"/>
+        <RowDefinition Height="Auto"/>
         <RowDefinition Height="*"/>
       </Grid.RowDefinitions>
 
-      <!-- Barre de titre -->
-      <Grid x:Name="BarreTitre" Background="Transparent" Margin="22,0,14,0">
-        <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="Auto"/>
-          <ColumnDefinition Width="*"/>
-          <ColumnDefinition Width="Auto"/>
-          <ColumnDefinition Width="Auto"/>
-        </Grid.ColumnDefinitions>
-        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-          <Border Width="40" Height="40" CornerRadius="12">
-            <Border.Background>
-              <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-                <GradientStop Color="#6EC1FF" Offset="0"/>
-                <GradientStop Color="#3D7BFF" Offset="1"/>
-              </LinearGradientBrush>
-            </Border.Background>
-            <TextBlock Text="❄" FontSize="22" Foreground="#FFFFFF" HorizontalAlignment="Center" VerticalAlignment="Center" FontFamily="Segoe UI Symbol"/>
+      <!-- En-tete : marque, infos machine, verdict, boutons fenetre -->
+      <Border Background="#111317" BorderBrush="#23262D" BorderThickness="0,0,0,1" CornerRadius="6,6,0,0">
+        <Grid x:Name="BarreTitre" Background="Transparent" Height="66">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="236"/>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+          <Border BorderBrush="#23262D" BorderThickness="0,0,1,0" Padding="20,0">
+            <StackPanel VerticalAlignment="Center">
+              <TextBlock Text="SnowFall SS" FontSize="14" FontWeight="SemiBold" Foreground="#F1F3F6"/>
+              <TextBlock x:Name="SousTitre" FontFamily="{StaticResource Mono}" FontSize="10" Foreground="#565B65" Margin="0,2,0,0"/>
+            </StackPanel>
           </Border>
-          <StackPanel Margin="14,0,0,0" VerticalAlignment="Center">
-            <TextBlock Text="SnowFall SS" FontSize="19" FontWeight="SemiBold" Foreground="#F2F6FC"/>
-            <TextBlock x:Name="SousTitre" Text="Outil de screenshare du staff" FontSize="12" Foreground="#7D8CA8"/>
+          <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="20,0">
+            <StackPanel>
+              <TextBlock Text="MACHINE / SESSION" Style="{StaticResource Etiquette}"/>
+              <TextBlock x:Name="InfoPc" Style="{StaticResource ValeurMono}"/>
+            </StackPanel>
+            <StackPanel x:Name="BadgeAdmin" Margin="32,0,0,0">
+              <TextBlock Text="DROITS" Style="{StaticResource Etiquette}"/>
+              <TextBlock x:Name="TexteAdmin" Style="{StaticResource ValeurMono}"/>
+              <TextBlock x:Name="IconeAdmin" Visibility="Collapsed"/>
+            </StackPanel>
+            <StackPanel Margin="32,0,0,0">
+              <TextBlock Text="VERSION" Style="{StaticResource Etiquette}"/>
+              <TextBlock x:Name="InfoVersion" Style="{StaticResource ValeurMono}"/>
+            </StackPanel>
           </StackPanel>
-        </StackPanel>
-        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,14,0">
-          <Border Background="#121B2E" CornerRadius="9" Padding="12,6" Margin="0,0,8,0">
-            <StackPanel Orientation="Horizontal">
-              <TextBlock Text="&#xE7F4;" FontFamily="{StaticResource Icones}" FontSize="13" Foreground="#7D8CA8" VerticalAlignment="Center"/>
-              <TextBlock x:Name="InfoPc" Margin="8,0,0,0" FontSize="12.5" Foreground="#C3CEE0" VerticalAlignment="Center"/>
-            </StackPanel>
+          <Border Grid.Column="2" BorderBrush="#23262D" BorderThickness="1,0,0,0" MinWidth="330">
+            <Grid>
+              <Border x:Name="Rond" Width="3" HorizontalAlignment="Left"/>
+              <TextBlock x:Name="IconeVerdict" Visibility="Collapsed"/>
+              <StackPanel Margin="22,0,24,0" VerticalAlignment="Center">
+                <TextBlock Text="VERDICT" Style="{StaticResource Etiquette}"/>
+                <TextBlock x:Name="Verdict" FontSize="15" FontWeight="SemiBold" Margin="0,1,0,0"/>
+                <TextBlock x:Name="SousVerdict" FontSize="11.5" Foreground="#7B818C" TextWrapping="Wrap" MaxWidth="380"/>
+              </StackPanel>
+            </Grid>
           </Border>
-          <Border x:Name="BadgeAdmin" CornerRadius="9" Padding="12,6">
-            <StackPanel Orientation="Horizontal">
-              <TextBlock x:Name="IconeAdmin" Text="&#xE83D;" FontFamily="{StaticResource Icones}" FontSize="13" VerticalAlignment="Center"/>
-              <TextBlock x:Name="TexteAdmin" Margin="8,0,0,0" FontSize="12.5" FontWeight="SemiBold" VerticalAlignment="Center"/>
-            </StackPanel>
-          </Border>
-        </StackPanel>
-        <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
-          <Button x:Name="BtnMin" Style="{StaticResource BtnFenetre}" Content="&#xE921;"/>
-          <Button x:Name="BtnFermer" Style="{StaticResource BtnFenetre}" Content="&#xE8BB;"/>
-        </StackPanel>
-      </Grid>
+          <StackPanel Grid.Column="3" Orientation="Horizontal">
+            <Border Width="1" Background="#23262D"/>
+            <Button x:Name="BtnMin" Style="{StaticResource BtnFenetre}" Content="&#xE921;"/>
+            <Button x:Name="BtnFermer" Style="{StaticResource BtnFenetre}" Content="&#xE8BB;"/>
+          </StackPanel>
+        </Grid>
+      </Border>
 
       <Grid Grid.Row="1">
         <Grid.ColumnDefinitions>
@@ -1548,22 +1594,18 @@ $SS_Xaml = @'
         </Grid.ColumnDefinitions>
 
         <!-- Navigation -->
-        <DockPanel Margin="16,6,10,18">
-          <TextBlock DockPanel.Dock="Top" Text="CATÉGORIES" FontSize="11" FontWeight="SemiBold" Foreground="#5F6E8A" Margin="14,0,0,10"/>
-          <Border DockPanel.Dock="Bottom" Background="#0F1729" BorderBrush="#1C2740" BorderThickness="1" CornerRadius="12" Padding="14,12">
-            <StackPanel>
-              <StackPanel Orientation="Horizontal">
-                <TextBlock Text="&#xE72E;" FontFamily="{StaticResource Icones}" FontSize="13" Foreground="#4FD69C" VerticalAlignment="Center"/>
-                <TextBlock Text="Lecture seule" Margin="8,0,0,0" FontSize="12.5" FontWeight="SemiBold" Foreground="#C3CEE0"/>
-              </StackPanel>
-              <TextBlock Text="Rien n'est modifié, supprimé ou envoyé (sauf les empreintes des mods à Modrinth)." TextWrapping="Wrap" FontSize="11.5" Foreground="#6F7E9A" Margin="0,6,0,0"/>
+        <Border Background="#111317" BorderBrush="#23262D" BorderThickness="0,0,1,0" CornerRadius="0,0,0,6">
+          <DockPanel Margin="0,12,0,14">
+            <StackPanel DockPanel.Dock="Bottom" Margin="20,0">
+              <TextBlock Text="LECTURE SEULE" Style="{StaticResource Etiquette}"/>
+              <TextBlock Text="Aucun fichier modifié, supprimé ou envoyé (sauf les empreintes des mods à Modrinth)." TextWrapping="Wrap" FontSize="11" Foreground="#565B65" Margin="0,4,0,0"/>
             </StackPanel>
-          </Border>
-          <StackPanel x:Name="Nav"/>
-        </DockPanel>
+            <StackPanel x:Name="Nav"/>
+          </DockPanel>
+        </Border>
 
         <!-- Contenu -->
-        <Grid Grid.Column="1" Margin="8,6,24,18">
+        <Grid Grid.Column="1" Margin="20,16,20,14">
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
@@ -1572,141 +1614,104 @@ $SS_Xaml = @'
             <RowDefinition Height="Auto"/>
           </Grid.RowDefinitions>
 
-          <!-- Verdict -->
-          <Border CornerRadius="16" BorderBrush="#1E2A42" BorderThickness="1" Padding="26,22">
-            <Border.Background>
-              <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-                <GradientStop Color="#13203A" Offset="0"/>
-                <GradientStop Color="#0D1526" Offset="1"/>
-              </LinearGradientBrush>
-            </Border.Background>
-            <Grid>
-              <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto"/>
-                <ColumnDefinition Width="*"/>
-              </Grid.ColumnDefinitions>
-              <Border x:Name="Rond" Width="76" Height="76" CornerRadius="38" VerticalAlignment="Center">
-                <TextBlock x:Name="IconeVerdict" FontFamily="{StaticResource Icones}" FontSize="32" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-              </Border>
-              <StackPanel Grid.Column="1" Margin="22,0,0,0" VerticalAlignment="Center">
-                <TextBlock Text="VERDICT" FontSize="11" FontWeight="SemiBold" Foreground="#6F7E9A"/>
-                <TextBlock x:Name="Verdict" FontSize="30" FontWeight="Bold" Margin="0,2,0,0"/>
-                <TextBlock x:Name="SousVerdict" FontSize="13.5" Foreground="#9AA8C2" TextWrapping="Wrap" Margin="0,2,0,0"/>
-                <Grid Margin="0,16,0,0">
-                  <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                  </Grid.ColumnDefinitions>
-                  <Grid Height="6" VerticalAlignment="Center">
-                    <Border x:Name="BarreFond" Background="#1A2540" CornerRadius="3"/>
-                    <Border x:Name="Barre" HorizontalAlignment="Left" Width="0" CornerRadius="3"/>
-                  </Grid>
-                  <TextBlock x:Name="Statut" Grid.Column="1" Margin="14,0,0,0" FontSize="12" Foreground="#7D8CA8" MinWidth="260" TextTrimming="CharacterEllipsis"/>
-                </Grid>
-              </StackPanel>
-            </Grid>
-          </Border>
-
-          <!-- Stats -->
-          <UniformGrid Grid.Row="1" Columns="4" Margin="0,14,-12,0">
-            <Border Style="{StaticResource Stat}">
-              <StackPanel>
-                <StackPanel Orientation="Horizontal">
-                  <Ellipse Width="8" Height="8" Fill="#FF5C6C" VerticalAlignment="Center"/>
-                  <TextBlock Text="Alertes rouges" Margin="8,0,0,0" FontSize="12.5" Foreground="#8B9AB5"/>
-                </StackPanel>
-                <TextBlock x:Name="StatRouge" Text="0" FontSize="30" FontWeight="Bold" Foreground="#FF5C6C" Margin="0,6,0,0"/>
-                <TextBlock Text="triche quasi certaine" FontSize="11.5" Foreground="#5F6E8A"/>
-              </StackPanel>
-            </Border>
-            <Border Style="{StaticResource Stat}">
-              <StackPanel>
-                <StackPanel Orientation="Horizontal">
-                  <Ellipse Width="8" Height="8" Fill="#FFB547" VerticalAlignment="Center"/>
-                  <TextBlock Text="Alertes orange" Margin="8,0,0,0" FontSize="12.5" Foreground="#8B9AB5"/>
-                </StackPanel>
-                <TextBlock x:Name="StatOrange" Text="0" FontSize="30" FontWeight="Bold" Foreground="#FFB547" Margin="0,6,0,0"/>
-                <TextBlock Text="à vérifier avec le joueur" FontSize="11.5" Foreground="#5F6E8A"/>
-              </StackPanel>
-            </Border>
-            <Border Style="{StaticResource Stat}">
-              <StackPanel>
-                <StackPanel Orientation="Horizontal">
-                  <Ellipse Width="8" Height="8" Fill="#6EC1FF" VerticalAlignment="Center"/>
-                  <TextBlock Text="Mods analysés" Margin="8,0,0,0" FontSize="12.5" Foreground="#8B9AB5"/>
-                </StackPanel>
-                <TextBlock x:Name="StatMods" Text="0" FontSize="30" FontWeight="Bold" Foreground="#E6EDF7" Margin="0,6,0,0"/>
-                <TextBlock Text="comparés à Modrinth" FontSize="11.5" Foreground="#5F6E8A"/>
-              </StackPanel>
-            </Border>
-            <Border Style="{StaticResource Stat}">
-              <StackPanel>
-                <StackPanel Orientation="Horizontal">
-                  <Ellipse Width="8" Height="8" Fill="#4FD69C" VerticalAlignment="Center"/>
-                  <TextBlock Text="Appareils USB branchés" Margin="8,0,0,0" FontSize="12.5" Foreground="#8B9AB5"/>
-                </StackPanel>
-                <TextBlock x:Name="StatUsb" Text="0" FontSize="30" FontWeight="Bold" Foreground="#E6EDF7" Margin="0,6,0,0"/>
-                <TextBlock x:Name="StatUsbSous" Text="0 dans l'historique" FontSize="11.5" Foreground="#5F6E8A"/>
-              </StackPanel>
-            </Border>
-          </UniformGrid>
-
-          <!-- Titre de section -->
-          <DockPanel Grid.Row="2" Margin="2,22,0,12">
-            <TextBlock x:Name="CompteListe" DockPanel.Dock="Right" FontSize="12.5" Foreground="#6F7E9A" VerticalAlignment="Bottom"/>
-            <TextBlock x:Name="TitreListe" Text="Résumé" FontSize="18" FontWeight="SemiBold" Foreground="#F2F6FC"/>
-          </DockPanel>
-
-          <!-- Resultats -->
-          <ScrollViewer x:Name="Defile" Grid.Row="3" VerticalScrollBarVisibility="Auto" Padding="0,0,6,0">
-            <ItemsControl x:Name="Liste">
-              <ItemsControl.ItemTemplate>
-                <DataTemplate>
-                  <Border x:Name="Carte" Background="#0F1729" BorderBrush="#1C2740" BorderThickness="1" CornerRadius="12" Margin="0,0,0,8" Cursor="Hand">
-                    <Grid>
-                      <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="4"/>
-                        <ColumnDefinition Width="*"/>
-                      </Grid.ColumnDefinitions>
-                      <Border Background="{Binding Couleur}" CornerRadius="12,0,0,12"/>
-                      <Grid Grid.Column="1" Margin="16,12,16,13">
-                        <Grid.ColumnDefinitions>
-                          <ColumnDefinition Width="*"/>
-                          <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
-                        <StackPanel>
-                          <TextBlock Text="{Binding Titre}" Foreground="#E6EDF7" FontSize="14" FontWeight="SemiBold" TextWrapping="Wrap"/>
-                          <TextBlock Text="{Binding Detail}" Foreground="#8E9CB7" FontSize="12.5" Margin="0,4,0,0" TextWrapping="Wrap"/>
-                          <TextBlock Text="{Binding Chemin}" Visibility="{Binding CheminVis}" Foreground="#56678A" FontFamily="Consolas" FontSize="11.5" Margin="0,6,0,0" TextTrimming="CharacterEllipsis"/>
-                        </StackPanel>
-                        <Border Grid.Column="1" VerticalAlignment="Top" Background="{Binding FondPill}" CornerRadius="8" Padding="10,3" Margin="14,0,0,0">
-                          <TextBlock Text="{Binding NiveauTexte}" Foreground="{Binding Couleur}" FontSize="11" FontWeight="Bold"/>
-                        </Border>
-                      </Grid>
-                    </Grid>
-                  </Border>
-                  <DataTemplate.Triggers>
-                    <Trigger SourceName="Carte" Property="IsMouseOver" Value="True">
-                      <Setter TargetName="Carte" Property="Background" Value="#142037"/>
-                      <Setter TargetName="Carte" Property="BorderBrush" Value="#2A3A5C"/>
-                    </Trigger>
-                  </DataTemplate.Triggers>
-                </DataTemplate>
-              </ItemsControl.ItemTemplate>
-            </ItemsControl>
-          </ScrollViewer>
-
-          <!-- Pied -->
-          <DockPanel Grid.Row="4" Margin="0,14,0,0">
-            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+          <!-- Progression + actions -->
+          <DockPanel>
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center" Margin="20,0,0,0">
               <Button x:Name="BtnCopier" Style="{StaticResource Btn}" Content="Copier le rapport"/>
               <Button x:Name="BtnOuvrir" Style="{StaticResource Btn}" Content="Ouvrir le rapport"/>
               <Button x:Name="BtnRelancer" Style="{StaticResource BtnPrimaire}" Content="Relancer le scan"/>
             </StackPanel>
             <StackPanel VerticalAlignment="Center">
-              <TextBlock Text="Double-clic sur une carte : ouvrir l'emplacement  ·  clic droit : copier" FontSize="11.5" Foreground="#56678A"/>
-              <TextBlock x:Name="InfoRapport" FontSize="11.5" Foreground="#6F7E9A" Margin="0,3,0,0" TextTrimming="CharacterEllipsis"/>
+              <TextBlock x:Name="Statut" FontFamily="{StaticResource Mono}" FontSize="11.5" Foreground="#7B818C" TextTrimming="CharacterEllipsis"/>
+              <Grid Height="2" Margin="0,8,0,0">
+                <Border x:Name="BarreFond" Background="#23262D"/>
+                <Border x:Name="Barre" HorizontalAlignment="Left" Width="0"/>
+              </Grid>
             </StackPanel>
+          </DockPanel>
+
+          <!-- Compteurs -->
+          <Border Grid.Row="1" Margin="0,16,0,0" Background="#111317" BorderBrush="#23262D" BorderThickness="1" CornerRadius="4">
+            <UniformGrid Columns="4">
+              <Border Style="{StaticResource Cellule}">
+                <StackPanel>
+                  <TextBlock Text="ALERTES" Style="{StaticResource Etiquette}"/>
+                  <TextBlock x:Name="StatRouge" Text="0" Style="{StaticResource Chiffre}" Foreground="#E5484D"/>
+                  <TextBlock Text="triche quasi certaine" Style="{StaticResource SousChiffre}"/>
+                </StackPanel>
+              </Border>
+              <Border Style="{StaticResource Cellule}">
+                <StackPanel>
+                  <TextBlock Text="À VÉRIFIER" Style="{StaticResource Etiquette}"/>
+                  <TextBlock x:Name="StatOrange" Text="0" Style="{StaticResource Chiffre}" Foreground="#E2A336"/>
+                  <TextBlock Text="à voir avec le joueur" Style="{StaticResource SousChiffre}"/>
+                </StackPanel>
+              </Border>
+              <Border Style="{StaticResource Cellule}">
+                <StackPanel>
+                  <TextBlock Text="MODS ANALYSÉS" Style="{StaticResource Etiquette}"/>
+                  <TextBlock x:Name="StatMods" Text="0" Style="{StaticResource Chiffre}"/>
+                  <TextBlock Text="comparés à Modrinth" Style="{StaticResource SousChiffre}"/>
+                </StackPanel>
+              </Border>
+              <Border Style="{StaticResource Cellule}" BorderThickness="0">
+                <StackPanel>
+                  <TextBlock Text="APPAREILS USB" Style="{StaticResource Etiquette}"/>
+                  <TextBlock x:Name="StatUsb" Text="0" Style="{StaticResource Chiffre}"/>
+                  <TextBlock x:Name="StatUsbSous" Style="{StaticResource SousChiffre}"/>
+                </StackPanel>
+              </Border>
+            </UniformGrid>
+          </Border>
+
+          <!-- Titre de section -->
+          <DockPanel Grid.Row="2" Margin="0,22,0,10">
+            <TextBlock x:Name="CompteListe" DockPanel.Dock="Right" FontFamily="{StaticResource Mono}" FontSize="11" Foreground="#565B65" VerticalAlignment="Bottom"/>
+            <TextBlock x:Name="TitreListe" FontSize="11.5" FontWeight="SemiBold" Foreground="#F1F3F6"/>
+          </DockPanel>
+
+          <!-- Resultats -->
+          <ScrollViewer x:Name="Defile" Grid.Row="3" VerticalScrollBarVisibility="Auto">
+            <Border VerticalAlignment="Top" BorderBrush="#23262D" BorderThickness="1,1,1,0" CornerRadius="4" Margin="0,0,4,0">
+              <ItemsControl x:Name="Liste">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate>
+                    <Border x:Name="Ligne" Background="#14161B" BorderBrush="#23262D" BorderThickness="0,0,0,1" Cursor="Hand">
+                      <Grid>
+                        <Grid.ColumnDefinitions>
+                          <ColumnDefinition Width="2"/>
+                          <ColumnDefinition Width="118"/>
+                          <ColumnDefinition Width="Auto"/>
+                          <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Border Background="{Binding Barre}"/>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top" Margin="12,12,0,10">
+                          <Border Width="7" Height="7" CornerRadius="1" Background="{Binding Couleur}" VerticalAlignment="Center"/>
+                          <TextBlock Text="{Binding NiveauTexte}" Foreground="{Binding Couleur}" FontFamily="{StaticResource Mono}" FontSize="10.5" FontWeight="SemiBold" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <TextBlock Grid.Column="2" Text="{Binding CatTexte}" Visibility="{Binding CatVis}" Width="150" Foreground="#7B818C" FontSize="12" Margin="0,10,12,10" TextWrapping="Wrap"/>
+                        <StackPanel Grid.Column="3" Margin="0,9,16,10">
+                          <TextBlock Text="{Binding Titre}" Foreground="#F1F3F6" FontSize="13" TextWrapping="Wrap"/>
+                          <TextBlock Text="{Binding Detail}" Foreground="#7B818C" FontSize="12" Margin="0,2,0,0" TextWrapping="Wrap"/>
+                          <TextBlock Text="{Binding Chemin}" Visibility="{Binding CheminVis}" Foreground="#8AB4F8" Opacity="0.85" FontFamily="{StaticResource Mono}" FontSize="11" Margin="0,4,0,0" TextTrimming="CharacterEllipsis"/>
+                        </StackPanel>
+                      </Grid>
+                    </Border>
+                    <DataTemplate.Triggers>
+                      <Trigger SourceName="Ligne" Property="IsMouseOver" Value="True">
+                        <Setter TargetName="Ligne" Property="Background" Value="#1A1D23"/>
+                      </Trigger>
+                    </DataTemplate.Triggers>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </Border>
+          </ScrollViewer>
+
+          <!-- Pied -->
+          <DockPanel Grid.Row="4" Margin="0,12,0,0">
+            <TextBlock DockPanel.Dock="Right" Text="double-clic : ouvrir l'emplacement · clic droit : copier" FontSize="11" Foreground="#565B65"/>
+            <TextBlock x:Name="InfoRapport" FontFamily="{StaticResource Mono}" FontSize="11" Foreground="#565B65" TextTrimming="CharacterEllipsis" Margin="0,0,20,0"/>
           </DockPanel>
         </Grid>
       </Grid>
@@ -1721,81 +1726,68 @@ function New-Interface {
     Add-Type -AssemblyName WindowsBase
 
     $script:Pinceaux = @{
-        ROUGE  = @{ C = (New-Pinceau '#FF5C6C'); F = (New-Pinceau '#2EFF5C6C') }
-        ORANGE = @{ C = (New-Pinceau '#FFB547'); F = (New-Pinceau '#2EFFB547') }
-        OK     = @{ C = (New-Pinceau '#4FD69C'); F = (New-Pinceau '#294FD69C') }
-        INFO   = @{ C = (New-Pinceau '#8FA3C4'); F = (New-Pinceau '#1F8FA3C4') }
-        ACCENT = @{ C = (New-Pinceau '#6EC1FF'); F = (New-Pinceau '#296EC1FF') }
+        ROUGE  = @{ C = (New-Pinceau '#E5484D') }
+        ORANGE = @{ C = (New-Pinceau '#E2A336') }
+        OK     = @{ C = (New-Pinceau '#46A758') }
+        INFO   = @{ C = (New-Pinceau '#6B7280') }
+        ACCENT = @{ C = (New-Pinceau '#8AB4F8') }
+        VIDE   = (New-Pinceau '#00000000')
     }
 
     $w = [Windows.Markup.XamlReader]::Parse($SS_Xaml)
     $ui = @{ Fenetre = $w }
     foreach ($nom in 'Racine', 'BarreTitre', 'SousTitre', 'InfoPc', 'BadgeAdmin', 'IconeAdmin', 'TexteAdmin', 'BtnMin', 'BtnFermer',
                      'Nav', 'Rond', 'IconeVerdict', 'Verdict', 'SousVerdict', 'BarreFond', 'Barre', 'Statut',
-                     'StatRouge', 'StatOrange', 'StatMods', 'StatUsb', 'StatUsbSous', 'TitreListe', 'CompteListe',
+                     'StatRouge', 'StatOrange', 'StatMods', 'StatUsb', 'StatUsbSous', 'TitreListe', 'CompteListe', 'InfoVersion',
                      'Defile', 'Liste', 'BtnCopier', 'BtnOuvrir', 'BtnRelancer', 'InfoRapport') {
         $ui[$nom] = $w.FindName($nom)
     }
     $ui.Actions = @($ui.BtnCopier, $ui.BtnOuvrir, $ui.BtnRelancer)
 
-    $ui.SousTitre.Text = "Outil de screenshare du staff  ·  v$SS_Version"
-    $ui.InfoPc.Text = "$env:COMPUTERNAME  ·  $env:USERNAME"
+    $ui.SousTitre.Text = "RAPPORT DE SCREENSHARE · WINDOWS"
+    $ui.InfoPc.Text = "$env:COMPUTERNAME / $env:USERNAME"
+    $ui.InfoVersion.Text = "v$SS_Version"
     if ($script:SS_Admin) {
-        $p = $script:Pinceaux.OK
-        $ui.TexteAdmin.Text = 'Administrateur'
+        $ui.TexteAdmin.Text = 'administrateur'
+        $ui.TexteAdmin.Foreground = (New-Pinceau '#D7DAE0')
     } else {
-        $p = $script:Pinceaux.ORANGE
-        $ui.TexteAdmin.Text = 'Pas administrateur : scan incomplet'
+        $ui.TexteAdmin.Text = 'utilisateur (scan incomplet)'
+        $ui.TexteAdmin.Foreground = $script:Pinceaux.ORANGE.C
     }
-    $ui.BadgeAdmin.Background = $p.F
-    $ui.TexteAdmin.Foreground = $p.C
-    $ui.IconeAdmin.Foreground = $p.C
 
     # Navigation
     $panneauNav = $ui.Nav
     $ui.Nav = @{}
-    $police = New-Object System.Windows.Media.FontFamily('Segoe Fluent Icons, Segoe MDL2 Assets')
+    $mono = New-Object System.Windows.Media.FontFamily('Cascadia Mono, Consolas')
+    $titreNav = {
+        param([string]$t, [string]$marge)
+        $tb = New-Object System.Windows.Controls.TextBlock
+        $tb.Text = $t; $tb.FontSize = 10; $tb.FontWeight = 'SemiBold'; $tb.Foreground = (New-Pinceau '#565B65'); $tb.Margin = $marge
+        [void]$panneauNav.Children.Add($tb)
+    }
+    & $titreNav 'VUE' '20,4,0,6'
     foreach ($cle in $SS_Categories.Keys) {
         $rb = New-Object System.Windows.Controls.RadioButton
         $rb.Style = $w.FindResource('Nav')
         $rb.Tag = $cle
-        $g = New-Object System.Windows.Controls.Grid
-        foreach ($largeur in 'Auto', '*', 'Auto') {
-            $cd = New-Object System.Windows.Controls.ColumnDefinition
-            $cd.Width = (New-Object System.Windows.GridLengthConverter).ConvertFromString($largeur)
-            $g.ColumnDefinitions.Add($cd)
-        }
-        $ic = New-Object System.Windows.Controls.TextBlock
-        $ic.Text = [string][char]$SS_Icones[$cle]
-        $ic.FontFamily = $police
-        $ic.FontSize = 15
-        $ic.VerticalAlignment = 'Center'
+        $g = New-Object System.Windows.Controls.DockPanel
+        $cpt = New-Object System.Windows.Controls.StackPanel
+        $cpt.Orientation = 'Horizontal'
+        [System.Windows.Controls.DockPanel]::SetDock($cpt, 'Right')
+        $cr = New-Object System.Windows.Controls.TextBlock; $cr.FontFamily = $mono; $cr.FontSize = 11; $cr.Foreground = $script:Pinceaux.ROUGE.C; $cr.Visibility = 'Collapsed'
+        $co = New-Object System.Windows.Controls.TextBlock; $co.FontFamily = $mono; $co.FontSize = 11; $co.Foreground = $script:Pinceaux.ORANGE.C; $co.Margin = '10,0,0,0'; $co.Visibility = 'Collapsed'
+        $cz = New-Object System.Windows.Controls.TextBlock; $cz.FontFamily = $mono; $cz.FontSize = 11; $cz.Foreground = (New-Pinceau '#565B65'); $cz.Text = '0'
+        foreach ($t in $cr, $co, $cz) { $t.VerticalAlignment = 'Center'; [void]$cpt.Children.Add($t) }
         $lb = New-Object System.Windows.Controls.TextBlock
         $lb.Text = $SS_Categories[$cle]
-        $lb.FontSize = 13.5
-        $lb.Margin = '12,0,0,0'
+        $lb.FontSize = 13
         $lb.VerticalAlignment = 'Center'
-        [System.Windows.Controls.Grid]::SetColumn($lb, 1)
-        $pas = New-Object System.Windows.Controls.Border
-        $pas.CornerRadius = 8
-        $pas.Padding = '8,1'
-        $pas.Visibility = 'Collapsed'
-        $pas.VerticalAlignment = 'Center'
-        $cp = New-Object System.Windows.Controls.TextBlock
-        $cp.FontSize = 11.5
-        $cp.FontWeight = 'Bold'
-        $pas.Child = $cp
-        [System.Windows.Controls.Grid]::SetColumn($pas, 2)
-        [void]$g.Children.Add($ic); [void]$g.Children.Add($lb); [void]$g.Children.Add($pas)
+        [void]$g.Children.Add($cpt); [void]$g.Children.Add($lb)
         $rb.Content = $g
         $rb.Add_Checked({ param($s, $e) if (-not $script:ChangeNav) { Show-Categorie $s.Tag } })
         [void]$panneauNav.Children.Add($rb)
-        if ($cle -eq 'Resume') {
-            $sep = New-Object System.Windows.Controls.Border
-            $sep.Height = 1; $sep.Background = (New-Pinceau '#1C2740'); $sep.Margin = '10,6,10,10'
-            [void]$panneauNav.Children.Add($sep)
-        }
-        $ui.Nav[$cle] = @{ Bouton = $rb; Pastille = $pas; Compte = $cp }
+        if ($cle -eq 'Resume') { & $titreNav 'CATÉGORIES' '20,16,0,6' }
+        $ui.Nav[$cle] = @{ Bouton = $rb; R = $cr; O = $co; Z = $cz }
     }
     # $ui.Nav est maintenant la table ; on garde le panneau a part
     $script:UI = $ui
