@@ -28,7 +28,7 @@ exec python3 - "$@" <<'SNOWSS_FIN_PYTHON'
 import os, sys, re, io, json, glob, time, zipfile, hashlib, datetime, subprocess, pwd, platform, socket, shutil
 import urllib.request, urllib.parse
 
-VERSION = '1.1'
+VERSION = '1.2'
 HEURES = 48
 SEUIL_MODRINTH = 2000
 MIN_AVANT_SCAN = 30
@@ -46,7 +46,7 @@ C = {'ROUGE': '\033[91m', 'ORANGE': '\033[93m', 'OK': '\033[92m', 'INFO': '\033[
      'T': '\033[96m', 'B': '\033[1m', 'R': '\033[0m', 'G': '\033[90m'}
 RES = []
 CATS = [('Systeme', 'Système'), ('Minecraft', 'Minecraft'), ('Injection', 'Injection dans le jeu'),
-        ('Mods', 'Mods'), ('Programmes', 'Programmes'), ('Usb', 'USB'),
+        ('Mods', 'Mods'), ('Programmes', 'Programmes'), ('Macros', 'Macros / autoclick'), ('Usb', 'USB'),
         ('Fichiers', 'Fichiers récents'), ('Corbeille', 'Corbeille')]
 
 def add(cat, niv, titre, detail='', chemin=''):
@@ -478,6 +478,143 @@ def scan_programmes():
                 if trouve <= 15: add('Programmes', 'ORANGE', 'Commande suspecte dans l\'historique du terminal', l2.strip()[:200])
     if trouve == 0: add('Programmes', 'OK', 'Historique du terminal', 'Aucune commande suspecte.')
 
+# ---------------- macros / autoclickers ----------------
+RE_CLIC_AUTO = re.compile(r'(?i)(xautoclick|autoclick|auto-clicker|clicker|xdotool|ydotool)')
+RE_MACRO_PROG = re.compile(r'(?i)^(xdotool|ydotool|ydotoold|autokey.*|xmacro.*|xnee|cnee|actiona|actexec|xautoclick|.*autoclick.*|.*clicker.*|input-remapper.*|key-?mapper.*|xbindkeys|sxhkd|evsieve|evdevremapkeys|makima|kmonad|keyd|interception.*|udevmon)$')
+RE_SOURIS_PROG = re.compile(r'(?i)^(piper|ratbagd|solaar|openrazer.*|polychromatic.*|ckb-next.*|razercommander|openrgb)$')
+RE_NOM_MACRO = re.compile(r'(?i)(?<![a-z0-9])(auto[ _-]?click(er|ing)?|rapid[ _-]?fire|butterfly|jitter[ _-]?click|drag[ _-]?click|spam[ _-]?click|turbo[ _-]?click|clicker|\d{1,2}[ _-]?cps)(?![a-z])')
+
+def analyse_macro(t):
+    """Dit si un script (bash, python, AutoKey, input-remapper, Lua...) clique tout seul."""
+    if not t: return None
+    clic = re.search(r'(?im)(\bxdotool\s+(click|mousedown)|\bydotool\s+click|\bpyautogui\.click|\bmouse\.click\b|\bpynput\b[\s\S]{0,400}\.click|\bBTN_(LEFT|RIGHT)\b|\bPress(AndRelease)?MouseButton\s*\(|^\s*Click\b|\bSend(Input)?\b[^\n]{0,40}\{\s*(Click|LButton))', t)
+    boucle = re.search(r'(?im)(^\s*(while|for|until|loop|repeat)\b|\bwhile\s+(true|1|:)|\brepeat\s*\(|\bSetTimer\b|--repeat\s+\d)', t)
+    tient = re.search(r'(?i)(IsMouseButtonPressed|GetKeyState\s*\(?\s*"?(LButton|RButton)|is_pressed\(|\bbutton_held\b)', t)
+    hasard = re.search(r'(?i)\brandom\b|\$RANDOM|shuf\s', t) and re.search(r'(?i)\bsleep\b|--delay', t)
+    bouge = re.search(r'(?i)\bxdotool\s+mousemove_relative|\bMoveMouseRelative\s*\(|\bmouse\.move\(|\bmoveRel\(', t)
+    if clic and (boucle or tient):
+        r = 'AUTOCLICKER : envoie des clics de souris en boucle'
+        if tient: r += " tant qu'un bouton est maintenu"
+        if hasard: r += ', avec un délai aléatoire pour paraître humain'
+        return ('ROUGE', r)
+    if bouge and (boucle or tient): return ('ORANGE', 'déplace la souris tout seul en boucle (anti-recul / visée)')
+    if clic: return ('ORANGE', 'envoie des clics de souris')
+    return None
+
+def fichiers_profonds(racines, motif, prof=4, maxi=30000):
+    ignore = re.compile(r'(?i)^(\.cache|cache|caches|node_modules|\.git|\.npm|\.cargo|\.rustup|\.local/share/steam|steamapps|proc|sys|\.mozilla|\.thunderbird|google-chrome|chromium|\.var)$')
+    vus = 0
+    for r in racines:
+        if not os.path.isdir(r): continue
+        for racine, sous, fs in os.walk(r):
+            if racine.count(os.sep) - r.count(os.sep) >= prof: sous[:] = []
+            sous[:] = [s for s in sous if not ignore.match(s)]
+            for f in fs:
+                vus += 1
+                if vus > maxi: return
+                if motif.search(f): yield os.path.join(racine, f)
+
+def scan_macros():
+    etape('Macros / autoclick')
+    alerte = 0; vus = set()
+    # 1. programmes de macro / clic automatique en cours
+    for pid in liste_pids():
+        c = comm(pid); args = cmdline(pid)
+        if not c or not args: continue
+        tout = ' '.join(args)
+        base = os.path.basename(args[0])
+        if RE_CLIC_AUTO.search(c) or RE_CLIC_AUTO.search(base) or re.search(r'\b(xdotool|ydotool)\s+(click|mousedown)', tout):
+            alerte += 1; add('Macros', 'ROUGE', 'Clic automatique EN COURS : ' + c, 'PID %d · %s' % (pid, tout[:200]), exe(pid) or ''); continue
+        if RE_MACRO_PROG.match(c) or RE_MACRO_PROG.match(base):
+            alerte += 1; add('Macros', 'ORANGE', 'Logiciel de macro / remappage EN COURS : ' + c, 'PID %d · %s' % (pid, tout[:200]), exe(pid) or ''); continue
+        if RE_SOURIS_PROG.match(c):
+            add('Macros', 'INFO', 'Logiciel de souris ouvert : ' + c, "Peut contenir des macros : fais-le ouvrir et montrer les boutons / macros."); continue
+        # script (bash, python, lua...) lance par le joueur : on lit son contenu
+        if re.match(r'^(ba|z|da|fi)?sh$|^python[0-9.]*$|^lua[0-9.]*$|^node$|^perl$', base):
+            for a in args[1:]:
+                if a.startswith('-') or not os.path.isfile(a): continue
+                ra = os.path.realpath(a)
+                if not (ra.startswith(HOME) or ra.startswith('/tmp') or externe(ra)) or ra in vus: break
+                vus.add(ra)
+                an = analyse_macro(lire(ra) or '')
+                if an: alerte += 1; add('Macros', an[0], 'Script EN COURS : ' + os.path.basename(ra), an[1] + ' · PID %d' % pid, ra)
+                break
+    # 2. scripts sur le disque
+    nb = 0
+    motif = re.compile(r'(?i)\.(sh|bash|py|lua|ahk|pl|js)$')
+    for p in fichiers_profonds([HOME] + [m[0] for m in MONTAGES], motif, prof=4):
+        rp = os.path.realpath(p)
+        if rp in vus or re.search(r'(?i)/(\.minecraft|site-packages|dist-packages|\.local/lib|\.local/share/(lutris|bottles|flatpak)|\.steam|\.wine|anaconda|miniconda|\.pyenv|venv|\.venv)/', rp): continue
+        try:
+            if os.path.getsize(rp) > 2 << 20: continue
+            mt = os.path.getmtime(rp)
+        except Exception: continue
+        t = lire(rp) or ''
+        if 'click' not in t.lower() and 'BTN_' not in t and 'MouseButton' not in t: continue
+        an = analyse_macro(t)
+        if not an: continue
+        vus.add(rp); nb += 1
+        sur = ' (sur une clé USB)' if sur_usb(rp) else ''
+        niv = an[0] if (an[0] != 'ROUGE' or mt >= NOW - 30 * 86400 or sur) else 'ORANGE'
+        alerte += 1; add('Macros', niv, 'Script de clic automatique' + sur + ' : ' + os.path.basename(rp), an[1] + ' · modifié le ' + fdate(mt), rp)
+        if nb >= 40: break
+    # 3. configurations de macros (AutoKey, input-remapper, xbindkeys, sxhkd, Solaar)
+    confs = []
+    for mo in ('.config/autokey/data/**/*.py', '.config/input-remapper*/presets/**/*.json', '.config/input-remapper*/**/*.json',
+               '.xbindkeysrc', '.config/sxhkd/sxhkdrc', '.config/solaar/rules.yaml', '.config/keyd/*.conf', '.config/makima/*.toml'):
+        confs += glob.glob(os.path.join(HOME, mo), recursive=True)
+    confs += glob.glob('/etc/keyd/*.conf') + glob.glob('/etc/interception/**/*.yaml', recursive=True)
+    for p in sorted(set(confs)):
+        if os.path.realpath(p) in vus: continue
+        t = lire(p) or ''
+        if not t: continue
+        an = analyse_macro(t)
+        noms = sorted(set(m.group(0).lower() for m in RE_NOM_MACRO.finditer(t)))[:6]
+        if re.search(r'(?i)repeat\s*\(', t) and re.search(r'BTN_(LEFT|RIGHT)|mouse\s*\(', t): an = ('ROUGE', 'macro input-remapper qui répète des clics (repeat + BTN_LEFT)')
+        elif not an and re.search(r'(?i)MouseClick|BTN_LEFT|BTN_RIGHT|xdotool\s+click', t): an = ('ORANGE', 'macro qui envoie des clics de souris')
+        if an:
+            alerte += 1; add('Macros', an[0], 'Macro configurée : ' + os.path.relpath(p, HOME) if p.startswith(HOME) else 'Macro configurée : ' + p, an[1] + (' · noms : ' + ', '.join(noms) if noms else ''), p)
+        elif noms:
+            alerte += 1; add('Macros', 'ORANGE', 'Macro au nom suspect : ' + os.path.basename(p), 'noms trouvés : ' + ', '.join(noms), p)
+        else:
+            add('Macros', 'INFO', 'Configuration de macros / remappage : ' + os.path.basename(p), "Pas de clic automatique trouvé dedans.", p)
+    # 4. fausses souris / faux claviers crees par un programme (uinput)
+    blocs = (lire('/proc/bus/input/devices') or '').split('\n\n')
+    for b in blocs:
+        m1 = re.search(r'N: Name="([^"]*)"', b); m2 = re.search(r'S: Sysfs=(\S+)', b); m3 = re.search(r'H: Handlers=(.*)', b)
+        if not (m1 and m2 and m3) or '/virtual/' not in m2.group(1): continue
+        nom = m1.group(1); h = m3.group(1)
+        if 'mouse' not in h and 'kbd' not in h: continue
+        genre = 'souris' if 'mouse' in h else 'clavier'
+        if re.search(r'(?i)ydotool|xdotool|py-evdev|uinput|autoclick|clicker|remapper|macro|evsieve|makima|kmonad|keyd', nom):
+            alerte += 1; add('Macros', 'ROUGE' if genre == 'souris' else 'ORANGE', 'Fausse %s créée par un programme : %s' % (genre, nom), 'Un logiciel peut cliquer / taper à la place du joueur via ce périphérique virtuel.')
+        elif re.search(r'(?i)steam|xwayland|virtualbox|vmware|qemu|spice|sunshine|kde ?connect|gamescope|wacom|power|sleep|video bus', nom):
+            add('Macros', 'INFO', 'Périphérique virtuel connu : ' + nom, genre)
+        else:
+            alerte += 1; add('Macros', 'ORANGE', 'Périphérique virtuel inconnu (%s) : %s' % (genre, nom), 'Créé par un programme et non par une vraie souris/clavier : demande au joueur ce que c\'est.')
+    if ROOT:
+        for pid in liste_pids():
+            try: fds = os.listdir('/proc/%d/fd' % pid)
+            except Exception: continue
+            for fd in fds:
+                try:
+                    if os.readlink('/proc/%d/fd/%s' % (pid, fd)) == '/dev/uinput':
+                        c = comm(pid)
+                        niv = 'INFO' if re.match(r'(?i)^(steam|sunshine|kdeconnectd|gamescope|solaar|systemd)', c) else 'ORANGE'
+                        if niv == 'ORANGE': alerte += 1
+                        add('Macros', niv, 'Programme qui peut simuler souris/clavier : ' + c, 'PID %d a ouvert /dev/uinput' % pid, exe(pid) or '')
+                        break
+                except Exception: pass
+    # 5. outils installes
+    for b, niv in (('xautoclick', 'ORANGE'), ('autokey-gtk', 'ORANGE'), ('autokey-qt', 'ORANGE'), ('actiona', 'ORANGE'), ('ydotool', 'ORANGE'),
+                   ('input-remapper-gtk', 'INFO'), ('xdotool', 'INFO'), ('xnee', 'INFO'), ('cnee', 'INFO')):
+        ch = shutil.which(b)
+        if ch:
+            if niv == 'ORANGE': alerte += 1
+            add('Macros', niv, 'Installé : ' + b, 'Outil capable de cliquer / taper automatiquement.', ch)
+    if alerte == 0: add('Macros', 'OK', 'Macros / autoclick', 'Aucun autoclicker, script de clic ni macro suspecte trouvé.')
+    add('Macros', 'INFO', 'Macros dans la mémoire de la souris', "Les macros enregistrées DANS la souris ne sont pas lisibles depuis le PC : fais montrer le logiciel de la souris.")
+
 def type_usb(classes, protos, nom):
     n = (nom or '').lower()
     souris = '02' in protos; clavier = '01' in protos
@@ -668,7 +805,7 @@ def bilan_usb():
 
 # =====================================================================
 print(C['T'] + C['B'] + '\n  ❄  SnowFall SS (Linux) v' + VERSION + C['R'] + C['G'] + '  ·  outil de screenshare du staff  ·  lecture seule' + C['R'])
-for f in (scan_systeme, scan_minecraft, scan_mods, scan_log, scan_programmes, scan_usb, scan_fichiers, bilan_usb):
+for f in (scan_systeme, scan_minecraft, scan_mods, scan_log, scan_programmes, scan_macros, scan_usb, scan_fichiers, bilan_usb):
     try:
         f()
     except Exception as e:

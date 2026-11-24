@@ -56,6 +56,7 @@ $SS_Categories = [ordered]@{
     Injection  = 'Injection / stream-proof'
     Mods       = 'Mods'
     Programmes = 'Programmes'
+    Macros     = 'Macros / autoclick'
     Usb        = 'USB'
     Fichiers   = 'Fichiers récents'
     Corbeille  = 'Corbeille'
@@ -711,8 +712,6 @@ function Invoke-ScanProgrammes {
         if ($pr.Name -match $SS_RegexProgramme -or $pr.ExecutablePath -match $SS_RegexProgramme) {
             Add-Res Programmes ORANGE ('Programme suspect ouvert : ' + $pr.Name) ('PID {0} · {1}' -f $pr.ProcessId, $pr.ExecutablePath) $pr.ExecutablePath
             $rien = $false
-        } elseif ($pr.Name -match $SS_RegexSouris) {
-            Add-Res Programmes INFO ('Logiciel souris/clavier : ' + $pr.Name) 'Peut faire des macros : demande au joueur de l''ouvrir pour vérifier.' $pr.ExecutablePath
         }
     }
     foreach ($gp in @(Get-Process | Where-Object { $_.MainWindowTitle })) {
@@ -749,6 +748,298 @@ function Invoke-ScanProgrammes {
     $pf = @(Get-ChildItem -Path "$env:windir\Prefetch" -Filter *.pf -Force | Where-Object { $_.LastWriteTime -ge $script:SS_Depuis -and $_.Name -match $SS_RegexProgramme })
     foreach ($f in $pf) { Add-Res Programmes ORANGE ('Prefetch : ' + $f.Name) ('lancé le ' + (Format-Date $f.LastWriteTime)) $f.FullName }
     if ($pf.Count -eq 0) { Add-Res Programmes OK 'Prefetch' 'Aucun programme suspect lancé récemment.' }
+}
+
+# =====================================================================
+#  Macros / autoclickers
+# =====================================================================
+$SS_RegexMacroProg = '(?i)(autohotkey|\.ahk2?\b|tinytask|pulover|macro.?creator|macro.?recorder|jitbit|macro|auto.?click|clicker|op.?auto|gs.?auto|murgee|speed.?auto|ghost.?mouse|mouse.?recorder|keyran|xmouse|x-mouse|interception)'
+$SS_RegexMacroClic = '(?i)(auto.?click|clicker|tinytask|op.?auto|gs.?auto|murgee|speed.?auto|ghost.?mouse)'
+$SS_RegexNomMacro  = '(?i)(?<![a-z0-9])(auto[ _-]?click(er|ing)?|rapid[ _-]?fire|butterfly|jitter[ _-]?click|drag[ _-]?click|spam[ _-]?click|turbo[ _-]?click|double[ _-]?click|clicker|god[ _-]?bridg\w*|\d{1,2}[ _-]?cps)(?![a-z])'
+$SS_RegexLogicielSouris = '(?i)(g hub|logitech gaming software|razer synapse|razer central|steelseries gg|steelseries engine|icue|bloody|glorious core|roccat swarm|ngenuity|x-?mouse button control)'
+
+function Get-FichiersProfonds {
+    param([string[]]$Racines, [string]$RegexNom, [int]$Prof = 3, [int]$Max = 3000)
+    $ignore = '(?i)^(cache|code cache|gpucache|dawncache|crashpad|crashdumps|blob_storage|indexeddb|service worker|session storage|logs?|node_modules|\.git|shadercache|webcache|temp|tmp|windowsapps)$'
+    $out = New-Object System.Collections.Generic.List[string]
+    $pile = New-Object System.Collections.Generic.Stack[object]
+    foreach ($r in $Racines) { if ($r -and [IO.Directory]::Exists($r)) { $pile.Push(@($r, 0)) } }
+    $vus = 0
+    while ($pile.Count -gt 0 -and $vus -lt $Max) {
+        $e = $pile.Pop(); $d = [string]$e[0]; $n = [int]$e[1]
+        try {
+            foreach ($f in [IO.Directory]::EnumerateFiles($d)) {
+                $vus++
+                if ([IO.Path]::GetFileName($f) -match $RegexNom) { $out.Add($f) }
+                if ($vus % 400 -eq 0) { Invoke-Pompe }
+                if ($vus -ge $Max) { break }
+            }
+        } catch { }
+        if ($n -lt $Prof) {
+            try { foreach ($s in [IO.Directory]::EnumerateDirectories($d)) { if ([IO.Path]::GetFileName($s) -notmatch $ignore) { $pile.Push(@($s, ($n + 1))) } } } catch { }
+        }
+    }
+    return ,$out
+}
+
+function Read-TexteBrut {
+    param([string]$Fichier, [long]$Max = 26214400)
+    try {
+        $fs = New-Object IO.FileStream($Fichier, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+        try {
+            if ($fs.Length -eq 0 -or $fs.Length -gt $Max) { return '' }
+            $b = New-Object byte[] $fs.Length
+            $lu = 0
+            while ($lu -lt $b.Length) { $k = $fs.Read($b, $lu, $b.Length - $lu); if ($k -le 0) { break }; $lu += $k }
+        } finally { $fs.Close() }
+        $t = [Text.Encoding]::GetEncoding(28591).GetString($b)
+        $zeros = 0; $ech = [Math]::Min($b.Length, 4000)
+        for ($i = 1; $i -lt $ech; $i += 2) { if ($b[$i] -eq 0) { $zeros++ } }
+        if ($ech -gt 0 -and $zeros -gt ($ech / 4)) { $t += "`n" + [Text.Encoding]::Unicode.GetString($b) }
+        elseif ($t -match '[\xC3\xC5][\x80-\xBF]') { $t += "`n" + [Text.Encoding]::UTF8.GetString($b) }
+        return $t
+    } catch { return '' }
+}
+
+function Get-AnalyseMacro {
+    # Dit si un script (AutoHotkey, Lua Logitech, AutoIt, Python...) clique tout seul
+    param([string]$Texte)
+    if (-not $Texte) { return $null }
+    $clic   = $Texte -match '(?im)(^\s*(Click|MouseClick|ControlClick)\b|\bClick\s*\(|\bSend(Input|Play|Event)?\b[^\r\n]{0,40}\{\s*(Click|LButton|RButton)|\bPress(AndRelease)?MouseButton\s*\(|\bmouse_event\b|\bpyautogui\.click|\bmouse\.click|\bpynput\b[\s\S]{0,400}\.click|\bxdotool\s+click|\bydotool\s+click|\bMouseClick\s*\()'
+    $boucle = $Texte -match '(?im)(^\s*(Loop|While|SetTimer|repeat|for|Do)\b|\bwhile\s*\(|\bwhile\s+true|\bSetTimer\b|\brepeat\b[\s\S]{0,600}\buntil\b)'
+    $tient  = $Texte -match '(?im)(GetKeyState\s*\(?\s*"?(LButton|RButton|XButton[12])|IsMouseButtonPressed\s*\(|^\s*[~$*!^+#]*(LButton|RButton|XButton1|XButton2|MButton)(\s+up)?\s*::)'
+    $hasard = ($Texte -match '(?i)\bRandom\b|math\.random|random\.(uniform|randint)') -and ($Texte -match '(?i)\bSleep\b|time\.sleep')
+    $bouge  = $Texte -match '(?i)\bMoveMouseRelative\s*\(|\bMouseMove\b[^\r\n]{0,40},\s*R\b|\bmouse\.move\(|\bmoveRel\('
+    if ($clic -and ($boucle -or $tient)) {
+        $r = 'AUTOCLICKER : envoie des clics de souris en boucle'
+        if ($tient) { $r += ' tant qu''un bouton est maintenu' }
+        if ($hasard) { $r += ', avec un délai aléatoire pour paraître humain' }
+        return @{ Niveau = 'ROUGE'; Raison = $r }
+    }
+    if ($bouge -and ($boucle -or $tient)) { return @{ Niveau = 'ORANGE'; Raison = 'déplace la souris tout seul en boucle (anti-recul / visée)' } }
+    if ($clic) { return @{ Niveau = 'ORANGE'; Raison = 'envoie des clics de souris' } }
+    return $null
+}
+
+function Test-ExeAutoHotkey {
+    param([string]$Fichier)
+    $t = Read-TexteBrut $Fichier 12582912
+    if (-not $t) { return $false }
+    return ($t -match 'AUTOHOTKEY SCRIPT' -or $t -match 'A.U.T.O.H.O.T.K.E.Y. .S.C.R.I.P.T' -or $t -match '(?i)AutoHotkey(SC)?\.exe|www\.autohotkey\.com')
+}
+
+function Invoke-ScanMacros {
+    Set-Etape 73 'Macros et autoclickers...'
+    $alerte = 0
+    $vus = @{}
+    $extUsb = @()
+    foreach ($u in $script:SS_Usb) { $extUsb += ($u.Lettre + '\') }
+
+    # 1. Programmes de macro ouverts (AutoHotkey, TinyTask, autoclickers, logiciels de souris)
+    foreach ($pr in @(Get-CimInstance Win32_Process)) {
+        $exe = "$($pr.ExecutablePath)"
+        if ($pr.Name -match '(?i)^autohotkey') {
+            $scr = $null
+            if ($pr.CommandLine -match '(?i)"?([^"]+\.ahk2?)"?\s*$' -or $pr.CommandLine -match '(?i)"([^"]+\.ahk2?)"') { $scr = $Matches[1] }
+            $alerte++
+            if ($scr -and (Test-Path -LiteralPath $scr)) {
+                $vus[$scr.ToLower()] = $true
+                $an = Get-AnalyseMacro (Read-TexteBrut $scr)
+                if ($an) { Add-Res Macros $an.Niveau ('Script AutoHotkey EN COURS : ' + (Split-Path $scr -Leaf)) $an.Raison $scr }
+                else { Add-Res Macros ORANGE ('Script AutoHotkey EN COURS : ' + (Split-Path $scr -Leaf)) 'ne clique pas lui-même, mais peut remapper des touches : demande au joueur de le fermer et de le montrer' $scr }
+            } else {
+                Add-Res Macros ORANGE 'AutoHotkey EN COURS' ('script : ' + $(if ($scr) { $scr } else { 'inconnu' }) + ' · PID ' + $pr.ProcessId) $exe
+            }
+            continue
+        }
+        if ($pr.Name -match $SS_RegexMacroClic -or $exe -match $SS_RegexMacroClic) {
+            $alerte++; Add-Res Macros ROUGE ('Autoclicker EN COURS : ' + $pr.Name) ('PID {0} · {1}' -f $pr.ProcessId, $exe) $exe; continue
+        }
+        if ($pr.Name -match $SS_RegexMacroProg) {
+            $alerte++; Add-Res Macros ORANGE ('Logiciel de macro EN COURS : ' + $pr.Name) ('PID {0} · {1}' -f $pr.ProcessId, $exe) $exe; continue
+        }
+        if ($pr.Name -match $SS_RegexSouris) {
+            Add-Res Macros INFO ('Logiciel de souris ouvert : ' + $pr.Name) 'Peut contenir des macros : fais-le ouvrir et montrer l''onglet Macros / Assignations.' $exe; continue
+        }
+        # programme AutoHotkey compile en .exe (macro cachee sous un autre nom)
+        if ($exe -and $exe -notmatch '(?i)^[A-Z]:\\(Windows|Program Files|Program Files \(x86\))\\' -and ($exe -like "$env:USERPROFILE*" -or (Test-SurUsb $exe) -or $exe -match '(?i)\\(temp|tmp)\\')) {
+            if (Test-ExeAutoHotkey $exe) {
+                $alerte++; Add-Res Macros ROUGE ('Macro AutoHotkey compilée EN COURS : ' + $pr.Name) ('script AutoHotkey caché dans un .exe · PID {0} · {1}' -f $pr.ProcessId, $exe) $exe
+            }
+        }
+    }
+    Invoke-Pompe
+
+    # 2. Scripts de macro sur le disque (.ahk, macros TinyTask / Pulover / Jitbit, Lua Logitech)
+    Set-Etape 74 'Macros : scripts sur le disque...'
+    $racines = @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('MyDocuments'), (Join-Path $env:USERPROFILE 'Downloads'), $env:APPDATA) + $extUsb
+    $fich = Get-FichiersProfonds -Racines $racines -RegexNom '(?i)\.(ahk|ah2|ahk2|amc|amc2|mcr|pmc|rec|lua|au3)$' -Prof 4 -Max 40000
+    $nbScripts = 0
+    foreach ($f in $fich) {
+        if ($vus.ContainsKey($f.ToLower())) { continue }
+        $ext = [IO.Path]::GetExtension($f).ToLower()
+        try { $fi = Get-Item -LiteralPath $f -Force } catch { continue }
+        $recent = $fi.LastWriteTime -ge (Get-Date).AddDays(-30)
+        $quand = ' · modifié le ' + (Format-Date $fi.LastWriteTime)
+        if ($ext -in '.lua', '.rec') {
+            $t = Read-TexteBrut $f 2097152
+            if ($ext -eq '.lua' -and $t -notmatch 'PressMouseButton|PressAndReleaseMouseButton|MoveMouseRelative') { continue }
+            if ($ext -eq '.rec' -and $f -notmatch '(?i)tinytask|macro|click') { continue }
+        } else { $t = Read-TexteBrut $f 4194304 }
+        $nbScripts++
+        $an = Get-AnalyseMacro $t
+        $sur = ''; if (Test-SurUsb $f) { $sur = ' (sur une clé USB)' }
+        if ($an -and $an.Niveau -eq 'ROUGE') {
+            $alerte++; $niv = $(if ($recent -or $sur) { 'ROUGE' } else { 'ORANGE' })
+            Add-Res Macros $niv ('Script autoclicker' + $sur + ' : ' + $fi.Name) ($an.Raison + $quand) $f
+        } elseif ($an) {
+            $alerte++; Add-Res Macros ORANGE ('Script de macro' + $sur + ' : ' + $fi.Name) ($an.Raison + $quand) $f
+        } elseif ($ext -in '.amc', '.amc2', '.mcr', '.pmc', '.rec') {
+            $niv = $(if ($recent) { 'ORANGE' } else { 'INFO' })
+            if ($niv -eq 'ORANGE') { $alerte++ }
+            Add-Res Macros $niv ('Fichier de macro enregistrée' + $sur + ' : ' + $fi.Name) ('macro de souris/clavier enregistrée (Bloody, Jitbit, Pulover, TinyTask...)' + $quand) $f
+        } else {
+            Add-Res Macros INFO ('Script AutoHotkey : ' + $fi.Name) ('ne contient pas de clic automatique' + $quand) $f
+        }
+        if ($nbScripts -ge 60) { break }
+    }
+    # .exe recents qui sont des macros AutoHotkey compilees
+    $exes = Get-FichiersProfonds -Racines @([Environment]::GetFolderPath('Desktop'), (Join-Path $env:USERPROFILE 'Downloads'), $env:TEMP) -RegexNom '(?i)\.exe$' -Prof 2 -Max 8000
+    foreach ($f in $exes) {
+        try { $fi = Get-Item -LiteralPath $f -Force } catch { continue }
+        if ($fi.Length -gt 12MB -or $fi.LastWriteTime -lt (Get-Date).AddDays(-30)) { continue }
+        if (Test-ExeAutoHotkey $f) { $alerte++; Add-Res Macros ORANGE ('Macro AutoHotkey compilée : ' + $fi.Name) ('script AutoHotkey caché dans un .exe · modifié le ' + (Format-Date $fi.LastWriteTime)) $f }
+    }
+
+    # 3. Macros enregistrees dans les logiciels de souris
+    Set-Etape 75 'Macros : logiciels de souris...'
+    $vendeurs = @(
+        @{ Nom = 'Logitech G HUB / LGS'; Dossiers = @("$env:LOCALAPPDATA\LGHUB", "$env:ProgramData\LGHUB", "$env:LOCALAPPDATA\Logitech\Logitech Gaming Software", "$env:APPDATA\Logitech") }
+        @{ Nom = 'Razer Synapse'; Dossiers = @("$env:LOCALAPPDATA\Razer", "$env:ProgramData\Razer", "$env:APPDATA\Razer") }
+        @{ Nom = 'SteelSeries GG / Engine'; Dossiers = @("$env:ProgramData\SteelSeries", "$env:APPDATA\steelseries-gg-client") }
+        @{ Nom = 'Corsair iCUE'; Dossiers = @("$env:APPDATA\Corsair", "$env:LOCALAPPDATA\Corsair", "$env:ProgramData\Corsair") }
+        @{ Nom = 'Bloody / A4Tech'; Dossiers = @("${env:ProgramFiles(x86)}\Bloody7", "$env:ProgramFiles\Bloody7", "${env:ProgramFiles(x86)}\Bloody8", "$env:ProgramFiles\Bloody8") }
+        @{ Nom = 'Glorious Core'; Dossiers = @("$env:LOCALAPPDATA\Glorious Core", "$env:APPDATA\Glorious Core", "$env:ProgramData\Glorious Core", "$env:APPDATA\GloriousCore") }
+        @{ Nom = 'ROCCAT Swarm'; Dossiers = @("$env:APPDATA\ROCCAT", "$env:ProgramData\ROCCAT") }
+        @{ Nom = 'HyperX NGenuity'; Dossiers = @("$env:ProgramData\HyperX", "$env:LOCALAPPDATA\HyperX") }
+        @{ Nom = 'X-Mouse Button Control'; Dossiers = @("$env:APPDATA\Highresolution Enterprises") }
+    )
+    foreach ($v in $vendeurs) {
+        $dossiers = @($v.Dossiers | Where-Object { $_ -and [IO.Directory]::Exists($_) })
+        if ($dossiers.Count -eq 0) { continue }
+        $fv = Get-FichiersProfonds -Racines $dossiers -RegexNom '(?i)(\.(xml|json|db|sqlite|lua|amc2?|cueprofile|txt|dat|ini|cfg|mcr|profile|settings)$|macro)' -Prof 7 -Max 6000
+        $nbMacro = 0; $noms = @{}; $scr = $null; $simule = $false; $recents = 0
+        foreach ($f in $fv) {
+            # fichiers livres avec le logiciel (traductions, presets, liste de jeux) : pas des macros du joueur
+            if ($f -match '(?i)\\(depots|strings|locales?|i18n|images?|icons?|resources|assets|presets?|applications?|firmware|drivers?|updates?)\\') { continue }
+            if ($f -match '(?i)macro') {
+                $nbMacro++
+                try { if ((Get-Item -LiteralPath $f -Force).LastWriteTime -ge (Get-Date).AddDays(-30)) { $recents++ } } catch { }
+            }
+            if ($f -match '(?i)\.amc2?$') { continue }
+            $t = Read-TexteBrut $f
+            if (-not $t) { continue }
+            foreach ($m in [regex]::Matches($t, $SS_RegexNomMacro)) { if ($noms.Count -lt 8) { $noms[$m.Value.Trim().ToLower()] = $true } }
+            if ($t -match 'PressMouseButton|PressAndReleaseMouseButton|MoveMouseRelative') {
+                foreach ($m in [regex]::Matches($t, 'PressMouseButton|PressAndReleaseMouseButton|MoveMouseRelative')) {
+                    $deb = [Math]::Max(0, $m.Index - 1500)
+                    $an = Get-AnalyseMacro ($t.Substring($deb, [Math]::Min(3000, $t.Length - $deb)))
+                    if ($an -and (-not $scr -or $an.Niveau -eq 'ROUGE')) { $scr = @{ An = $an; F = $f } }
+                    if ($scr -and $scr.An.Niveau -eq 'ROUGE') { break }
+                }
+            }
+            if ($v.Nom -like 'X-Mouse*' -and $t -match '(?i)\{(LMB|RMB|MB4|MB5)\}') { $simule = $true }
+            Invoke-Pompe
+        }
+        if ($scr) {
+            $alerte++
+            Add-Res Macros $scr.An.Niveau ('Script dans ' + $v.Nom) ($scr.An.Raison + ' · script Lua du logiciel de souris') $scr.F
+        }
+        if ($noms.Count -gt 0) {
+            $alerte++
+            Add-Res Macros ORANGE ('Macro au nom suspect dans ' + $v.Nom) ('noms trouvés : ' + (($noms.Keys | Sort-Object) -join ', ') + ' · fais ouvrir le logiciel et montrer cette macro') $dossiers[0]
+        }
+        if ($simule) {
+            $alerte++
+            Add-Res Macros ORANGE 'X-Mouse Button Control simule des clics' 'un bouton de la souris est réglé pour envoyer des clics ({LMB}/{RMB}) : peut servir d''autoclicker' $dossiers[0]
+        }
+        if (-not $scr -and $noms.Count -eq 0 -and -not $simule) {
+            if ($nbMacro -gt 0) {
+                $niv = $(if ($recents -gt 0 -and $v.Nom -like 'Bloody*') { 'ORANGE' } else { 'INFO' })
+                $det = "$nbMacro fichier(s) de macros"
+                if ($recents -gt 0) { $det += " dont $recents modifié(s) ces 30 derniers jours" }
+                Add-Res Macros $niv ($v.Nom + ' : macros enregistrées') ($det + ' · fais ouvrir le logiciel et montrer l''onglet Macros') $dossiers[0]
+            } else {
+                Add-Res Macros INFO ($v.Nom + ' installé') 'Aucune macro trouvée dans ses fichiers (les macros dans la mémoire de la souris restent invisibles).' $dossiers[0]
+            }
+        }
+    }
+
+    # 4. Pilotes qui interceptent la souris / le clavier (Interception = autoclickers indétectables)
+    Set-Etape 76 'Macros : pilotes souris / clavier...'
+    $interception = $false
+    foreach ($svc in 'mouse', 'keyboard') {
+        $p = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$svc" -ErrorAction SilentlyContinue
+        if ($p -and "$($p.ImagePath)" -match "(?i)$svc\.sys") { $interception = $true }
+    }
+    $filtres = @()
+    foreach ($cl in @(@('{4D36E96F-E325-11CE-BFC1-08002BE10318}', 'souris', 'mouclass'), @('{4D36E96B-E325-11CE-BFC1-08002BE10318}', 'clavier', 'kbdclass'))) {
+        $p = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Class\$($cl[0])" -ErrorAction SilentlyContinue
+        foreach ($fl in @($p.UpperFilters)) {
+            if (-not $fl -or $fl -eq $cl[2]) { continue }
+            if ($fl -in 'mouse', 'keyboard') { $interception = $true; continue }
+            $filtres += "$fl ($($cl[1]))"
+        }
+    }
+    if ($interception) {
+        $alerte++
+        Add-Res Macros ORANGE 'Pilote Interception installé' 'Pilote qui intercepte la souris et le clavier : utilisé par les autoclickers et macros « indétectables ». Demande au joueur à quoi il sert.'
+    }
+    if ($filtres.Count -gt 0) { Add-Res Macros INFO 'Filtres de pilote souris / clavier' (($filtres -join ', ') + ' · souvent un logiciel de marque, à vérifier si inconnu') }
+
+    # 5. Logiciels de macro installes / lances recemment (sans admin)
+    Set-Etape 77 'Macros : historique...'
+    $inst = @{}
+    foreach ($k in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*') {
+        foreach ($a in @(Get-ItemProperty $k -ErrorAction SilentlyContinue)) {
+            $n = "$($a.DisplayName)"
+            if (-not $n -or $inst.ContainsKey($n)) { continue }
+            if ($n -match '(?i)(autohotkey|tinytask|pulover|macro|auto.?clicker|jitbit|murgee|ghost.?mouse|keyran|interception)') {
+                $inst[$n] = $true; $alerte++
+                $di = "$($a.InstallDate)"
+                if ($di -match '^(\d{4})(\d\d)(\d\d)$') { $di = "$($Matches[3])/$($Matches[2])/$($Matches[1])" } elseif (-not $di) { $di = '?' }
+                Add-Res Macros ORANGE ('Logiciel de macro installé : ' + $n) ('installé le ' + $di + ' · ' + $a.InstallLocation) "$($a.InstallLocation)"
+            } elseif ($n -match $SS_RegexLogicielSouris) {
+                $inst[$n] = $true
+                Add-Res Macros INFO ('Logiciel de souris installé : ' + $n) 'Peut faire des macros : fais-le ouvrir pendant le screenshare.' "$($a.InstallLocation)"
+            }
+        }
+    }
+    $rot13 = { param([string]$s) -join ($s.ToCharArray() | ForEach-Object { $c = [int]$_; if ($c -ge 65 -and $c -le 90) { [char](65 + ($c - 65 + 13) % 26) } elseif ($c -ge 97 -and $c -le 122) { [char](97 + ($c - 97 + 13) % 26) } else { $_ } }) }
+    foreach ($cle in @(Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist' -ErrorAction SilentlyContinue)) {
+        $p = Get-ItemProperty (Join-Path $cle.PSPath 'Count') -ErrorAction SilentlyContinue
+        if (-not $p) { continue }
+        foreach ($x in $p.PSObject.Properties) {
+            if ($x.Value -isnot [byte[]] -or $x.Value.Length -lt 68) { continue }
+            $chemin = & $rot13 $x.Name
+            if ($chemin -notmatch $SS_RegexMacroProg -or $chemin -match '(?i)uninst') { continue }
+            $quand = $null
+            try { $ft = [BitConverter]::ToInt64($x.Value, 60); if ($ft -gt 0) { $quand = [DateTime]::FromFileTime($ft) } } catch { }
+            if (-not $quand -or $quand -lt (Get-Date).AddDays(-30)) { continue }
+            $niv = 'ORANGE'
+            if ($quand -ge $script:SS_Depuis -and $chemin -match $SS_RegexMacroClic) { $niv = 'ROUGE' }
+            $alerte++
+            Add-Res Macros $niv ('Lancé récemment : ' + (Split-Path $chemin -Leaf)) ('dernier lancement : {0} (il y a {1}) · {2} fois · {3}' -f (Format-Date $quand), (Format-Duree ((Get-Date) - $quand)), [BitConverter]::ToInt32($x.Value, 4), $chemin) $chemin
+        }
+    }
+    if ($script:SS_Admin) {
+        foreach ($f in @(Get-ChildItem -Path "$env:windir\Prefetch" -Filter *.pf -Force -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge (Get-Date).AddDays(-30) -and $_.Name -match '(?i)(autohotkey|tinytask|pulover|macro|clicker|murgee|ghostmouse|keyran)' })) {
+            $alerte++; Add-Res Macros ORANGE ('Prefetch : ' + $f.Name) ('lancé le ' + (Format-Date $f.LastWriteTime)) $f.FullName
+        }
+    }
+
+    if ($alerte -eq 0) { Add-Res Macros OK 'Macros / autoclick' 'Aucun autoclicker, script de macro ni macro suspecte trouvé.' }
+    Add-Res Macros INFO 'Macros dans la mémoire de la souris' 'Les macros enregistrées DANS la souris (mode sans logiciel) ne sont pas lisibles depuis le PC : fais montrer le logiciel de la souris.'
 }
 
 function Invoke-ScanUsb {
@@ -1252,6 +1543,7 @@ function Start-Scan {
         Invoke-ScanMods
         Invoke-ScanLogJeu
         Invoke-ScanProgrammes
+        Invoke-ScanMacros
         Invoke-ScanStreamProof
         Invoke-ScanUsb
         Invoke-ScanPeripheriques
