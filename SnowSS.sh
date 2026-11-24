@@ -712,61 +712,87 @@ HTML_MODELE = r'''<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>SnowFall SS</title>
 <style>
-:root{--bg:#0a0f1c;--pan:#0f172a;--pan2:#141e35;--line:#22304f;--txt:#e7eef9;--mut:#8796b4;--acc:#5cc8ff;--r:#ff5468;--o:#ffb03a;--ok:#33d69f;--i:#7f8fb3}
+:root{--bg:#0c0d10;--pan:#111317;--row:#14161b;--hov:#1a1d23;--line:#23262d;--line2:#2c3038;--txt:#d7dae0;--fort:#f1f3f6;--mut:#7b818c;--fai:#565b65;
+--r:#e5484d;--o:#e2a336;--ok:#46a758;--i:#6b7280;--acc:#8ab4f8;--mono:ui-monospace,"JetBrains Mono","DejaVu Sans Mono","Liberation Mono",monospace}
 *{box-sizing:border-box}html,body{margin:0;height:100%}
-body{background:var(--bg);color:var(--txt);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Ubuntu,Cantarell,"Noto Sans",sans-serif;display:flex;flex-direction:column}
-header{display:flex;align-items:center;gap:14px;padding:14px 20px;background:var(--pan);border-bottom:1px solid var(--line);flex-wrap:wrap}
-.logo{width:38px;height:38px;border-radius:10px;display:grid;place-items:center;font-size:21px;background:linear-gradient(135deg,#1d4ed8,#5cc8ff)}
-.tt{font-weight:700;font-size:16px}.st{color:var(--mut);font-size:12px}
-.verd{margin-left:auto;padding:9px 16px;border-radius:12px;font-weight:800;letter-spacing:.3px;border:1px solid}
-.verd small{display:block;font-weight:500;font-size:12px;letter-spacing:0;opacity:.85}
-.verd.ROUGE{color:var(--r);background:#ff546814;border-color:#ff546866}
-.verd.ORANGE{color:var(--o);background:#ffb03a14;border-color:#ffb03a66}
-.verd.OK{color:var(--ok);background:#33d69f14;border-color:#33d69f66}
+body{background:var(--bg);color:var(--txt);font:13px/1.5 Inter,system-ui,-apple-system,"Segoe UI",Ubuntu,Cantarell,"Noto Sans",sans-serif;display:flex;flex-direction:column;-webkit-font-smoothing:antialiased}
+::selection{background:#8ab4f833}
+header{display:flex;align-items:stretch;border-bottom:1px solid var(--line);background:var(--pan);flex-wrap:wrap}
+.marque{display:flex;flex-direction:column;justify-content:center;padding:12px 20px;border-right:1px solid var(--line);min-width:236px}
+.marque b{color:var(--fort);font-size:14px;font-weight:600;letter-spacing:.2px}
+.marque span{color:var(--fai);font:11px var(--mono);text-transform:uppercase;letter-spacing:.8px}
+.meta{display:flex;gap:28px;align-items:center;padding:0 20px;flex:1;flex-wrap:wrap}
+.meta div{display:flex;flex-direction:column;padding:8px 0}
+.meta small{color:var(--fai);font-size:10px;text-transform:uppercase;letter-spacing:.9px}
+.meta code{font:12px var(--mono);color:var(--txt)}
+.verd{display:flex;flex-direction:column;justify-content:center;padding:10px 22px;border-left:1px solid var(--line);min-width:280px;position:relative}
+.verd::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--c)}
+.verd small{color:var(--fai);font-size:10px;text-transform:uppercase;letter-spacing:.9px}
+.verd b{color:var(--c);font-size:15px;font-weight:600;letter-spacing:.4px}
+.verd span{color:var(--mut);font-size:12px}
+.verd.ROUGE{--c:var(--r)}.verd.ORANGE{--c:var(--o)}.verd.OK{--c:var(--ok)}
 main{flex:1;display:flex;min-height:0}
-nav{width:236px;flex:none;padding:12px;background:var(--pan);border-right:1px solid var(--line);overflow:auto}
-nav button{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:9px 12px;margin-bottom:4px;border:0;border-radius:9px;background:none;color:var(--txt);font:inherit;text-align:left;cursor:pointer}
-nav button:hover{background:var(--pan2)}nav button.on{background:#5cc8ff1f;color:var(--acc);font-weight:600}
-.bd{display:flex;gap:4px}.bd b{min-width:22px;padding:1px 6px;border-radius:20px;font-size:11px;text-align:center;color:#0a0f1c}
-.bd b.r{background:var(--r)}.bd b.o{background:var(--o)}.bd b.ok{background:none;color:var(--ok)}
+nav{width:236px;flex:none;background:var(--pan);border-right:1px solid var(--line);overflow:auto;padding:10px 0}
+nav .tit{padding:8px 20px 6px;color:var(--fai);font-size:10px;text-transform:uppercase;letter-spacing:.9px}
+nav button{display:flex;align-items:center;gap:10px;width:100%;padding:7px 20px;border:0;border-left:2px solid transparent;background:none;color:var(--mut);font:inherit;text-align:left;cursor:pointer}
+nav button:hover{color:var(--txt);background:var(--hov)}
+nav button.on{color:var(--fort);border-left-color:var(--acc);background:var(--hov)}
+nav .n{margin-left:auto;display:flex;gap:10px;font:11px var(--mono)}
+nav .n .r{color:var(--r)}nav .n .o{color:var(--o)}nav .n .z{color:var(--fai)}
 section{flex:1;display:flex;flex-direction:column;min-width:0}
-.bar{display:flex;gap:8px;align-items:center;padding:12px 20px;border-bottom:1px solid var(--line);flex-wrap:wrap}
-.bar input{flex:1;min-width:180px;padding:9px 12px;border-radius:9px;border:1px solid var(--line);background:var(--pan2);color:var(--txt);font:inherit;outline:none}
+.bar{display:flex;gap:10px;align-items:center;padding:10px 20px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.bar input{flex:1;min-width:200px;height:30px;padding:0 10px;border-radius:4px;border:1px solid var(--line2);background:var(--bg);color:var(--txt);font:inherit;outline:none}
 .bar input:focus{border-color:var(--acc)}
-.chip,.btn{padding:7px 12px;border-radius:20px;border:1px solid var(--line);background:var(--pan2);color:var(--mut);font:inherit;font-size:13px;cursor:pointer}
-.chip.on{color:var(--txt);border-color:var(--acc)}.btn{border-radius:9px;color:var(--txt)}.btn:hover,.chip:hover{border-color:var(--acc)}
-#liste{flex:1;overflow:auto;padding:16px 20px 30px}
-h2{font-size:15px;margin:6px 0 12px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.6px}
-.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px}
-.tile{background:var(--pan2);border:1px solid var(--line);border-radius:12px;padding:14px}
-.tile b{display:block;font-size:28px;line-height:1.1}.tile span{color:var(--mut);font-size:12px}
-.tile.r b{color:var(--r)}.tile.o b{color:var(--o)}.tile.ok b{color:var(--ok)}
-.meta{color:var(--mut);margin-bottom:18px}.meta b{color:var(--txt);font-weight:600}.meta .o{color:var(--o)}
-.it{background:var(--pan2);border:1px solid var(--line);border-left:4px solid var(--i);border-radius:10px;padding:10px 14px;margin-bottom:8px}
-.it.r{border-left-color:var(--r);background:#ff54680d}.it.o{border-left-color:var(--o)}.it.ok{border-left-color:var(--ok)}
-.hd{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}.ti{font-weight:600;word-break:break-word}
-.pl{flex:none;font-size:11px;font-weight:700;padding:1px 8px;border-radius:20px;color:#0a0f1c;background:var(--i)}
-.pl.r{background:var(--r)}.pl.o{background:var(--o)}.pl.ok{background:var(--ok)}
-.ct{flex:none;font-size:11px;color:var(--acc);border:1px solid #5cc8ff55;border-radius:20px;padding:0 7px}
-.de{color:var(--mut);margin-top:3px;word-break:break-word}
-.ch{margin-top:4px;font:12px ui-monospace,"DejaVu Sans Mono",monospace;color:var(--acc);word-break:break-all;cursor:pointer}
-.ch:hover{text-decoration:underline}
-.vide{padding:30px;text-align:center;color:var(--mut);border:1px dashed var(--line);border-radius:12px}
-footer{padding:8px 20px;color:var(--mut);font-size:12px;border-top:1px solid var(--line);background:var(--pan)}
-#toast{position:fixed;bottom:44px;left:50%;transform:translateX(-50%);background:var(--acc);color:#0a0f1c;font-weight:600;padding:8px 16px;border-radius:20px;opacity:0;transition:opacity .2s;pointer-events:none}
-@media (max-width:760px){main{flex-direction:column}nav{width:auto;display:flex;gap:4px;overflow-x:auto;border-right:0;border-bottom:1px solid var(--line)}nav button{width:auto;flex:none;margin:0}.verd{margin-left:0;width:100%}#liste,.bar{padding-left:16px;padding-right:16px}}
-@media print{nav,.bar,footer,#toast{display:none}body{background:#fff;color:#000}#liste{overflow:visible}.it,.tile{background:#fff;color:#000}.de{color:#333}}
+.seg{display:flex;border:1px solid var(--line2);border-radius:4px;overflow:hidden}
+.seg button{height:28px;padding:0 11px;border:0;border-right:1px solid var(--line2);background:none;color:var(--mut);font:inherit;font-size:12px;cursor:pointer}
+.seg button:last-child{border-right:0}.seg button:hover{color:var(--txt)}.seg button.on{background:var(--hov);color:var(--fort)}
+.btn{height:30px;padding:0 12px;border-radius:4px;border:1px solid var(--line2);background:var(--pan);color:var(--txt);font:inherit;font-size:12px;cursor:pointer}
+.btn:hover{border-color:var(--mut)}
+#liste{flex:1;overflow:auto;padding:18px 20px 40px}
+h2{display:flex;align-items:baseline;gap:10px;margin:0 0 10px;font-size:12px;font-weight:600;color:var(--fort);text-transform:uppercase;letter-spacing:.9px}
+h2 small{color:var(--fai);font:11px var(--mono);text-transform:none;letter-spacing:0}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);border:1px solid var(--line);border-radius:4px;margin-bottom:22px;background:var(--pan)}
+.stat{padding:14px 16px;border-right:1px solid var(--line)}.stat:last-child{border-right:0}
+.stat b{display:block;font:500 24px/1.2 var(--mono);color:var(--fort)}
+.stat span{color:var(--fai);font-size:11px;text-transform:uppercase;letter-spacing:.8px}
+.stat.r b{color:var(--r)}.stat.o b{color:var(--o)}.stat.ok b{color:var(--ok)}
+.tab{border:1px solid var(--line);border-radius:4px;overflow:hidden}
+.ln{display:grid;grid-template-columns:112px 1fr;border-bottom:1px solid var(--line);background:var(--row)}
+.ln:last-child{border-bottom:0}.ln:hover{background:var(--hov)}
+.ln.cat{grid-template-columns:112px 150px 1fr}
+.sev{display:flex;align-items:flex-start;gap:8px;padding:10px 14px;font:600 10px/19px var(--mono);letter-spacing:.8px;color:var(--c)}
+.sev::before{content:"";flex:none;width:7px;height:7px;margin-top:6px;border-radius:1px;background:var(--c)}
+.ROUGE{--c:var(--r)}.ORANGE{--c:var(--o)}.OK{--c:var(--ok)}.INFO{--c:var(--i)}
+.ln.ROUGE{box-shadow:inset 2px 0 0 var(--r)}
+.cg{padding:10px 14px 10px 0;color:var(--mut);font-size:12px;line-height:19px}
+.co{padding:10px 14px 10px 0;min-width:0}
+.ti{color:var(--fort);word-break:break-word}
+.de{color:var(--mut);margin-top:2px;word-break:break-word}
+.ch{margin-top:4px;font:11.5px var(--mono);color:var(--acc);word-break:break-all;cursor:copy;opacity:.85}
+.ch:hover{opacity:1;text-decoration:underline}
+.vide{padding:28px;text-align:center;color:var(--fai);border:1px solid var(--line);border-radius:4px;background:var(--row)}
+footer{display:flex;gap:20px;padding:7px 20px;color:var(--fai);font:11px var(--mono);border-top:1px solid var(--line);background:var(--pan);flex-wrap:wrap}
+#toast{position:fixed;bottom:40px;right:20px;background:var(--pan);border:1px solid var(--line2);color:var(--txt);padding:8px 14px;border-radius:4px;font-size:12px;opacity:0;transition:opacity .15s;pointer-events:none}
+@media (max-width:860px){main{flex-direction:column}nav{width:auto;display:flex;overflow-x:auto;padding:0;border-right:0;border-bottom:1px solid var(--line)}nav .tit{display:none}
+ nav button{width:auto;flex:none;border-left:0;border-bottom:2px solid transparent;padding:10px 14px}nav button.on{border-bottom-color:var(--acc)}
+ .marque,.verd{min-width:0;width:100%;border:0}.meta{gap:16px}.stats{grid-template-columns:repeat(2,1fr)}.stat:nth-child(2){border-right:0}.stat:nth-child(-n+2){border-bottom:1px solid var(--line)}
+ .ln,.ln.cat{grid-template-columns:1fr}.sev{padding-bottom:0}.cg,.co{padding-left:14px}.cg{padding-top:0;padding-bottom:0}#liste,.bar{padding-left:16px;padding-right:16px}}
+@media print{nav,.bar,footer,#toast{display:none}body,header,.ln,.stats,.tab{background:#fff!important;color:#000}.ti{color:#000}#liste{overflow:visible}}
 </style></head><body>
-<header><div class="logo">❄</div><div><div class="tt">SnowFall SS · Linux</div><div class="st" id="sous"></div></div><div class="verd" id="verd"></div></header>
+<header>
+ <div class="marque"><b>SnowFall SS</b><span>Rapport de screenshare · Linux</span></div>
+ <div class="meta" id="meta"></div>
+ <div class="verd" id="verd"></div>
+</header>
 <main><nav id="nav"></nav><section>
-<div class="bar"><input id="q" placeholder="Rechercher (nom de mod, chemin, appareil...)" autocomplete="off">
-<button class="chip on" data-n="">Tout</button><button class="chip" data-n="ROUGE">Rouge</button><button class="chip" data-n="ORANGE">Orange</button><button class="chip" data-n="OK">OK</button><button class="chip" data-n="INFO">Info</button>
-<button class="btn" id="copier">Copier le rapport</button><button class="btn" id="imprimer">PDF</button></div>
+<div class="bar"><input id="q" placeholder="Rechercher : mod, chemin, appareil, processus…" autocomplete="off">
+<div class="seg" id="seg"><button class="on" data-n="">Tout</button><button data-n="ROUGE">Alerte</button><button data-n="ORANGE">À vérifier</button><button data-n="OK">OK</button><button data-n="INFO">Info</button></div>
+<button class="btn" id="copier">Copier le rapport</button><button class="btn" id="imprimer">Exporter PDF</button></div>
 <div id="liste"></div></section></main>
 <footer id="pied"></footer><div id="toast"></div>
 <script>
 const D=__DATA__;
-const LV={ROUGE:['Rouge','r'],ORANGE:['Orange','o'],OK:['OK','ok'],INFO:['Info','i']};
+const LV={ROUGE:'ALERTE',ORANGE:'À VÉRIFIER',OK:'OK',INFO:'INFO'};
 const NOMS={};for(const c of D.cats)NOMS[c[0]]=c[1];
 let cat='Resume',niv='',q='';
 const $=s=>document.querySelector(s);
@@ -775,31 +801,33 @@ const compte=(c,n)=>D.res.filter(r=>(!c||r[0]===c)&&r[1]===n).length;
 function toast(t){const e=$('#toast');e.textContent=t;e.style.opacity=1;clearTimeout(toast.t);toast.t=setTimeout(()=>e.style.opacity=0,1400)}
 function copier(t,msg){const fin=()=>toast(msg);const vieux=()=>{const a=document.createElement('textarea');a.value=t;document.body.appendChild(a);a.select();try{document.execCommand('copy')}catch(e){}a.remove();fin()};
  if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(fin,vieux);else vieux()}
-function menu(){let h='';
- const ent=[['Resume','Résumé']].concat(D.cats.filter(c=>D.res.some(r=>r[0]===c[0])));
- for(const [k,nm] of ent){const R=compte(k==='Resume'?null:k,'ROUGE'),O=compte(k==='Resume'?null:k,'ORANGE');
-  h+='<button class="'+(k===cat&&!q?'on':'')+'" data-c="'+k+'"><span>'+esc(nm)+'</span><span class="bd">'+(R?'<b class="r">'+R+'</b>':'')+(O?'<b class="o">'+O+'</b>':'')+(!R&&!O?'<b class="ok">✓</b>':'')+'</span></button>'}
+function menu(){let h='<div class="tit">Vue</div>';
+ const bouton=(k,nm)=>{const c=k==='Resume'?null:k,R=compte(c,'ROUGE'),O=compte(c,'ORANGE');
+  return '<button class="'+(k===cat&&!q?'on':'')+'" data-c="'+k+'"><span>'+esc(nm)+'</span><span class="n">'+(R?'<span class="r">'+R+'</span>':'')+(O?'<span class="o">'+O+'</span>':'')+(!R&&!O?'<span class="z">0</span>':'')+'</span></button>'};
+ h+=bouton('Resume','Résumé')+'<div class="tit">Catégories</div>';
+ for(const c of D.cats)if(D.res.some(r=>r[0]===c[0]))h+=bouton(c[0],c[1]);
  $('#nav').innerHTML=h;
  for(const b of document.querySelectorAll('#nav button'))b.onclick=()=>{cat=b.dataset.c;q='';$('#q').value='';menu();liste()}}
-function carte(r,avecCat){const l=LV[r[1]]||LV.INFO;
- return '<div class="it '+l[1]+'"><div class="hd"><span class="pl '+l[1]+'">'+l[0]+'</span>'+(avecCat?'<span class="ct">'+esc(NOMS[r[0]]||r[0])+'</span>':'')+'<span class="ti">'+esc(r[2])+'</span></div>'
-  +(r[3]?'<div class="de">'+esc(r[3])+'</div>':'')+(r[4]&&String(r[3]).indexOf(r[4])<0?'<div class="ch" data-p="'+esc(r[4])+'" title="Cliquer pour copier le chemin">'+esc(r[4])+'</div>':'')+'</div>'}
+function ligne(r,avecCat){
+ return '<div class="ln '+r[1]+(avecCat?' cat':'')+'"><div class="sev">'+(LV[r[1]]||r[1])+'</div>'+(avecCat?'<div class="cg">'+esc(NOMS[r[0]]||r[0])+'</div>':'')
+  +'<div class="co"><div class="ti">'+esc(r[2])+'</div>'+(r[3]?'<div class="de">'+esc(r[3])+'</div>':'')
+  +(r[4]&&String(r[3]).indexOf(r[4])<0?'<div class="ch" data-p="'+esc(r[4])+'" title="Copier le chemin">'+esc(r[4])+'</div>':'')+'</div></div>'}
+const tableau=(rs,avecCat,vide)=>rs.length?'<div class="tab">'+rs.map(r=>ligne(r,avecCat)).join('')+'</div>':'<div class="vide">'+vide+'</div>';
 function liste(){const ql=q.toLowerCase();let h='';
  const ok=r=>(!niv||r[1]===niv)&&(!ql||(r[2]+' '+r[3]+' '+r[4]).toLowerCase().indexOf(ql)>=0);
- if(ql){const rs=D.res.filter(ok);h='<h2>Recherche : '+rs.length+' résultat(s)</h2>'+(rs.length?rs.map(r=>carte(r,true)).join(''):'<div class="vide">Aucun résultat.</div>')}
- else if(cat==='Resume'){const R=compte(null,'ROUGE'),O=compte(null,'ORANGE'),K=compte(null,'OK');
-  h='<div class="tiles"><div class="tile r"><b>'+R+'</b><span>alerte(s) rouge</span></div><div class="tile o"><b>'+O+'</b><span>point(s) orange</span></div><div class="tile ok"><b>'+K+'</b><span>vérification(s) OK</span></div><div class="tile"><b>'+D.res.length+'</b><span>lignes au total</span></div></div>'
-   +'<div class="meta">PC <b>'+esc(D.pc)+'</b> · session <b>'+esc(D.user)+'</b> · '+(D.root?'mode root ✓':'<span class="o">lancé sans sudo : scan incomplet</span>')+' · '+esc(D.date)+'</div>';
+ if(ql){const rs=D.res.filter(ok);h='<h2>Recherche<small>'+rs.length+' résultat(s)</small></h2>'+tableau(rs,true,'Aucun résultat.')}
+ else if(cat==='Resume'){
+  h='<div class="stats"><div class="stat r"><b>'+compte(null,'ROUGE')+'</b><span>Alertes</span></div><div class="stat o"><b>'+compte(null,'ORANGE')+'</b><span>À vérifier</span></div><div class="stat ok"><b>'+compte(null,'OK')+'</b><span>Contrôles OK</span></div><div class="stat"><b>'+D.res.length+'</b><span>Entrées</span></div></div>';
   const imp=D.res.filter(r=>(r[1]==='ROUGE'||r[1]==='ORANGE')&&ok(r)).sort((a,b)=>(a[1]==='ROUGE'?0:1)-(b[1]==='ROUGE'?0:1));
-  h+=imp.length?'<h2>À regarder avec le joueur</h2>'+imp.map(r=>carte(r,true)).join(''):'<div class="vide">Aucune alerte rouge ou orange'+(niv?' avec ce filtre':'')+'.</div>'}
- else{const rs=D.res.filter(r=>r[0]===cat&&ok(r));h='<h2>'+esc(NOMS[cat]||cat)+'</h2>'+(rs.length?rs.map(r=>carte(r,false)).join(''):'<div class="vide">Rien à afficher avec ce filtre.</div>')}
+  h+='<h2>Points à examiner avec le joueur<small>'+imp.length+'</small></h2>'+tableau(imp,true,'Aucune alerte ni point à vérifier'+(niv?' avec ce filtre':'')+'.')}
+ else{const rs=D.res.filter(r=>r[0]===cat&&ok(r));h='<h2>'+esc(NOMS[cat]||cat)+'<small>'+rs.length+' entrée(s)</small></h2>'+tableau(rs,false,'Rien à afficher avec ce filtre.')}
  $('#liste').innerHTML=h;$('#liste').scrollTop=0;
  for(const e of document.querySelectorAll('.ch'))e.onclick=()=>copier(e.dataset.p,'Chemin copié')}
-const v=D.verdict;$('#verd').className='verd '+v[2];$('#verd').innerHTML='VERDICT : '+esc(v[0])+'<small>'+esc(v[1])+'</small>';
-$('#sous').textContent='v'+D.version+' · '+D.date+' · '+D.pc+' / '+D.user;
-$('#pied').textContent='Lecture seule : rien n\'a été modifié sur ce PC · rapport texte : '+D.fichier;
+const v=D.verdict;$('#verd').className='verd '+v[2];$('#verd').innerHTML='<small>Verdict</small><b>'+esc(v[0])+'</b><span>'+esc(v[1])+'</span>';
+$('#meta').innerHTML=[['Machine',D.pc],['Session',D.user],['Date',D.date],['Droits',D.root?'root':'utilisateur (incomplet)'],['Version','v'+D.version]].map(x=>'<div><small>'+x[0]+'</small><code>'+esc(x[1])+'</code></div>').join('');
+$('#pied').innerHTML='<span>Lecture seule · aucune modification effectuée</span><span>Rapport texte : '+esc(D.fichier)+'</span>';
 document.title='SnowFall SS · '+v[0];
-for(const c of document.querySelectorAll('.chip'))c.onclick=()=>{niv=c.dataset.n;for(const x of document.querySelectorAll('.chip'))x.classList.toggle('on',x===c);liste()};
+for(const c of document.querySelectorAll('#seg button'))c.onclick=()=>{niv=c.dataset.n;for(const x of document.querySelectorAll('#seg button'))x.classList.toggle('on',x===c);liste()};
 $('#q').oninput=e=>{q=e.target.value.trim();menu();liste()};
 $('#copier').onclick=()=>copier(D.rapport,'Rapport copié');$('#imprimer').onclick=()=>window.print();
 menu();liste();
