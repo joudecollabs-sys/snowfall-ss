@@ -378,6 +378,140 @@ public static class SnowNatif {
 }
 '@
 
+$SS_CodePoignees = @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public static class SnowPoignees {
+    [DllImport("ntdll.dll")] static extern int NtQuerySystemInformation(int cls, IntPtr buf, int len, out int ret);
+    [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint acc, bool inh, uint pid);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll")] static extern uint GetCurrentProcessId();
+    [DllImport("advapi32.dll")] static extern bool OpenProcessToken(IntPtr p, uint acc, out IntPtr t);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)] static extern bool LookupPrivilegeValue(string s, string n, out long luid);
+    [StructLayout(LayoutKind.Sequential, Pack = 4)] struct TP { public uint Count; public long Luid; public uint Attr; }
+    [DllImport("advapi32.dll")] static extern bool AdjustTokenPrivileges(IntPtr t, bool dis, ref TP n, int len, IntPtr p, IntPtr r);
+    public static void ActiverDebug() {
+        IntPtr t;
+        if (!OpenProcessToken(GetCurrentProcess(), 0x28, out t)) return;
+        long l;
+        if (LookupPrivilegeValue(null, "SeDebugPrivilege", out l)) { var tp = new TP { Count = 1, Luid = l, Attr = 2 }; AdjustTokenPrivileges(t, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero); }
+        CloseHandle(t);
+    }
+    public class Acces { public uint Pid; public uint Droits; }
+    [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr h, int cls, IntPtr buf, int len, out int ret);
+    [DllImport("kernel32.dll")] static extern bool DuplicateHandle(IntPtr sp, IntPtr sh, IntPtr tp, out IntPtr th, uint acc, bool inh, uint opt);
+    [DllImport("kernel32.dll")] static extern uint GetProcessId(IntPtr h);
+    static IntPtr Poignees(IntPtr proc, out long n) {
+        n = 0; int taille = 1 << 16, ret;
+        for (int essai = 0; essai < 8; essai++) {
+            IntPtr b = Marshal.AllocHGlobal(taille);
+            int st = NtQueryInformationProcess(proc, 51, b, taille, out ret);
+            if (st == 0) { n = Marshal.ReadInt64(b); return b; }
+            Marshal.FreeHGlobal(b);
+            if (st != unchecked((int)0xC0000004) && st != unchecked((int)0x80000005) && st != unchecked((int)0xC0000023)) return IntPtr.Zero;
+            taille = Math.Max(taille * 2, ret + 4096);
+        }
+        return IntPtr.Zero;
+    }
+    // Sans admin : on parcourt les poignees de chaque programme qu'on peut ouvrir (meme utilisateur)
+    public static List<Acces> OuvreursUtilisateur(uint cible, out int illisibles) {
+        illisibles = 0;
+        var res = new Dictionary<uint, uint>();
+        uint moi = GetCurrentProcessId();
+        // index du type "Process" : on le lit sur une de nos propres poignees
+        IntPtr hc = OpenProcess(0x1000, false, cible);
+        if (hc == IntPtr.Zero) return null;
+        int typeProc = -1;
+        try {
+            long n; IntPtr b = Poignees(GetCurrentProcess(), out n);
+            if (b == IntPtr.Zero) return null;
+            try { for (long i = 0; i < n; i++) { long p = b.ToInt64() + 16 + i * 40; if (Marshal.ReadInt64(new IntPtr(p)) == hc.ToInt64()) { typeProc = Marshal.ReadInt32(new IntPtr(p + 28)); break; } } }
+            finally { Marshal.FreeHGlobal(b); }
+        } finally { CloseHandle(hc); }
+        if (typeProc < 0) return null;
+        foreach (var pr in System.Diagnostics.Process.GetProcesses()) {
+            uint pid = (uint)pr.Id;
+            if (pid == moi || pid == cible || pid <= 4) continue;
+            IntPtr hp = OpenProcess(0x40 | 0x400, false, pid);
+            if (hp == IntPtr.Zero) { illisibles++; continue; }
+            try {
+                long n; IntPtr b = Poignees(hp, out n);
+                if (b == IntPtr.Zero) { illisibles++; continue; }
+                try {
+                    for (long i = 0; i < n; i++) {
+                        long p = b.ToInt64() + 16 + i * 40;
+                        if (Marshal.ReadInt32(new IntPtr(p + 28)) != typeProc) continue;
+                        IntPtr dup;
+                        if (!DuplicateHandle(hp, Marshal.ReadIntPtr(new IntPtr(p)), GetCurrentProcess(), out dup, 0x1000, false, 0)) continue;
+                        uint vise = GetProcessId(dup); CloseHandle(dup);
+                        if (vise != cible) continue;
+                        uint acc = (uint)Marshal.ReadInt32(new IntPtr(p + 24));
+                        uint deja; res[pid] = res.TryGetValue(pid, out deja) ? (deja | acc) : acc;
+                    }
+                } finally { Marshal.FreeHGlobal(b); }
+            } finally { CloseHandle(hp); }
+        }
+        var l = new List<Acces>();
+        foreach (var kv in res) l.Add(new Acces { Pid = kv.Key, Droits = kv.Value });
+        return l;
+    }
+    // Liste des processus qui ont une poignee ouverte sur le processus "cible" (et les droits obtenus)
+    public static List<Acces> Ouvreurs(uint cible, out string erreur) {
+        erreur = null;
+        IntPtr h = OpenProcess(0x1000, false, cible);
+        if (h == IntPtr.Zero) { erreur = "impossible d'ouvrir le jeu"; return null; }
+        try {
+            int taille = 1 << 23, ret = 0, st = 0; IntPtr buf = IntPtr.Zero;
+            while (true) {
+                buf = Marshal.AllocHGlobal(taille);
+                st = NtQuerySystemInformation(64, buf, taille, out ret);
+                if (st == unchecked((int)0xC0000004)) {
+                    Marshal.FreeHGlobal(buf); buf = IntPtr.Zero;
+                    taille = Math.Max(taille * 2, ret + (1 << 20));
+                    if (taille > (1 << 30)) { erreur = "table trop grande"; return null; }
+                    continue;
+                }
+                break;
+            }
+            try {
+                if (st != 0) { erreur = "statut 0x" + st.ToString("X8"); return null; }
+                long n = Marshal.ReadIntPtr(buf).ToInt64();
+                int te = 8 + 8 + 8 + 4 + 2 + 2 + 4 + 4;
+                long debut = buf.ToInt64() + 16;
+                long moi = GetCurrentProcessId();
+                long hv = h.ToInt64();
+                long objet = 0; int type = -1;
+                for (long i = 0; i < n; i++) {
+                    long p = debut + i * te;
+                    if (Marshal.ReadInt64(new IntPtr(p + 8)) == moi && Marshal.ReadInt64(new IntPtr(p + 16)) == hv) {
+                        objet = Marshal.ReadInt64(new IntPtr(p)); type = Marshal.ReadInt16(new IntPtr(p + 30)); break;
+                    }
+                }
+                if (objet == 0) { erreur = "adresses masquées par Windows (lance en administrateur)"; return null; }
+                var res = new Dictionary<uint, uint>();
+                for (long i = 0; i < n; i++) {
+                    long p = debut + i * te;
+                    if (Marshal.ReadInt64(new IntPtr(p)) != objet || Marshal.ReadInt16(new IntPtr(p + 30)) != type) continue;
+                    uint pid = (uint)Marshal.ReadInt64(new IntPtr(p + 8));
+                    if (pid == moi || pid == cible) continue;
+                    uint acc = (uint)Marshal.ReadInt32(new IntPtr(p + 24));
+                    uint deja; res[pid] = res.TryGetValue(pid, out deja) ? (deja | acc) : acc;
+                }
+                var l = new List<Acces>();
+                foreach (var kv in res) l.Add(new Acces { Pid = kv.Key, Droits = kv.Value });
+                return l;
+            } finally { if (buf != IntPtr.Zero) Marshal.FreeHGlobal(buf); }
+        } finally { CloseHandle(h); }
+    }
+}
+'@
+
+function Initialize-Poignees {
+    if (-not ('SnowPoignees' -as [type])) { Add-Type -TypeDefinition $SS_CodePoignees -ErrorAction Stop }
+}
+
 function Initialize-Natif {
     if (-not ('SnowNatif' -as [type])) { Add-Type -TypeDefinition $SS_CodeNatif -ErrorAction Stop }
 }
@@ -924,7 +1058,92 @@ function Invoke-ScanMods {
     & $entetesJusqua $dossiers.Count
 }
 
+$SS_RegexOuvreurConnu = '(?i)^(csrss|lsass|svchost|wininit|services|smss|MsMpEng|NisSrv|SecurityHealthService|MpDefenderCoreService|audiodg|dwm|explorer|taskmgr|sihost|ctfmon|WmiPrvSE|RuntimeBroker|SearchHost|StartMenuExperienceHost|ShellExperienceHost|ApplicationFrameHost|Discord|DiscordCanary|DiscordPTB|Medal|MedalEncoder|obs64|obs32|obs-ffmpeg-mux|nvcontainer|NVIDIA Share|NVIDIA Overlay|NVIDIA app|nvsphelper64|RadeonSoftware|amdow|AMDRSServ|AMDRSSrcExt|atieclxx|steam|steamwebhelper|GameBar|GameBarFTServer|GameBarPresenceWriter|XboxGameBarWidgets|Overwolf|OverwolfHelper64|ShareX|avp|AvastSvc|AvastUI|avgsvc|ekrn|bdservicehost|MBAMService|vgc|vgtray|EasyAntiCheat|BEService|Lunar Client|Feather Launcher|Badlion Client|Modrinth App|prismlauncher|MinecraftLauncher|CurseForge|ATLauncher|GDLauncher|PolyMC|MultiMC|MSIAfterburner|RTSS|RTSSHooksLoader64|EncoderServer|Spotify|WerFault|WerFaultSecure|Lightshot|Gyazo|SteelSeriesGG|lghub_agent|NahimicSvc64|Nahimic3)$'
+$SS_RoleConnu = @(
+    @('(?i)^(Medal|MedalEncoder)$', 'Medal : enregistrement de clips'),
+    @('(?i)^obs', 'OBS : enregistrement / stream'),
+    @('(?i)^Discord', 'Discord : détection du jeu / overlay'),
+    @('(?i)^(nv|NVIDIA)', 'NVIDIA : overlay / enregistrement'),
+    @('(?i)^(Radeon|amd|AMD|atie)', 'AMD : overlay / enregistrement'),
+    @('(?i)^(csrss|lsass|svchost|wininit|services|smss|dwm|explorer|sihost|ctfmon|WmiPrvSE|RuntimeBroker|audiodg|taskmgr)', 'Windows'),
+    @('(?i)^(MsMpEng|NisSrv|SecurityHealth|MpDefender|avp|Avast|avg|ekrn|bdservice|MBAM)', 'antivirus'),
+    @('(?i)^(vgc|EasyAntiCheat|BEService)', 'anti-cheat d''un autre jeu'),
+    @('(?i)^(GameBar|XboxGameBar)', 'Xbox Game Bar'),
+    @('(?i)^(steam|Overwolf|MSIAfterburner|RTSS)', 'overlay / FPS')
+)
+
+function Format-Droits {
+    param([uint32]$d)
+    if (($d -band 0x1FFFFF) -eq 0x1FFFFF) { return 'accès total (lire, écrire, injecter)' }
+    $l = @()
+    if ($d -band 0x20) { $l += 'écrire dans la mémoire' }
+    if ($d -band 0x10) { $l += 'lire la mémoire' }
+    if ($d -band 0x2) { $l += 'lancer du code dans le jeu' }
+    if ($d -band 0x8) { $l += 'modifier la mémoire' }
+    if ($d -band 0x800) { $l += 'mettre le jeu en pause' }
+    if ($d -band 0x1) { $l += 'fermer le jeu' }
+    if ($d -band 0x40) { $l += 'copier ses poignées' }
+    if ($l.Count -eq 0) { $l += 'consulter seulement' }
+    return ($l -join ', ')
+}
+
+function Invoke-ScanAccesJeu {
+    # Quels programmes ont « ouvert » le processus de Minecraft, et avec quels droits
+    Set-Etape 67 'Programmes qui ouvrent Minecraft...'
+    $jeux = @(Get-CimInstance Win32_Process -Filter "Name='java.exe' OR Name='javaw.exe'" | Where-Object { "$($_.CommandLine)" -match $SS_RegexJeu -or -not $_.CommandLine })
+    if ($jeux.Count -eq 0) { Add-Res Programmes INFO 'Programmes qui ouvrent Minecraft' 'Non vérifié : Minecraft n''est pas lancé.'; return }
+    try { Initialize-Poignees } catch { Add-Res Programmes INFO 'Programmes qui ouvrent Minecraft' ('Vérification impossible : ' + $_.Exception.Message); return }
+    $tous = @{}; foreach ($x in @(Get-CimInstance Win32_Process)) { $tous[[int]$x.ProcessId] = $x }
+    $suspects = 0
+    foreach ($jeu in $jeux) {
+        $liste = $null; $mode = ''; $err = $null; $ill = 0
+        if ($script:SS_Admin) {
+            try { [SnowPoignees]::ActiverDebug(); $liste = [SnowPoignees]::Ouvreurs([uint32]$jeu.ProcessId, [ref]$err); $mode = 'complet' } catch { $liste = $null }
+        }
+        if ($null -eq $liste) {
+            try { $liste = [SnowPoignees]::OuvreursUtilisateur([uint32]$jeu.ProcessId, [ref]$ill); $mode = 'utilisateur' } catch { $liste = $null }
+        }
+        if ($null -eq $liste) { Add-Res Programmes INFO 'Programmes qui ouvrent Minecraft' 'Vérification impossible sur ce PC.'; continue }
+        foreach ($a in ($liste | Sort-Object { -[int](($_.Droits -band 0x32) -ne 0) }, Pid)) {
+            $pr = $tous[[int]$a.Pid]
+            $nom = $(if ($pr) { $pr.Name -replace '\.exe$', '' } else { "PID $($a.Pid)" })
+            $chemin = $(if ($pr) { "$($pr.ExecutablePath)" } else { '' })
+            $droits = Format-Droits $a.Droits
+            $det = ('{0} · PID {1}{2}' -f $droits, $a.Pid, $(if ($chemin) { ' · ' + $chemin } else { '' }))
+            if ([int]$a.Pid -eq [int]$jeu.ParentProcessId) {
+                Add-Res Programmes INFO ('Ouvre Minecraft : ' + $nom + ' (le launcher qui a lancé le jeu)') $det $chemin; continue
+            }
+            if ($nom -match $SS_RegexOuvreurConnu -and -not (Test-SurUsb $chemin)) {
+                $role = 'programme connu'
+                foreach ($r in $SS_RoleConnu) { if ($nom -match $r[0]) { $role = $r[1]; break } }
+                Add-Res Programmes INFO ('Ouvre Minecraft : ' + $nom + ' (' + $role + ')') $det $chemin; continue
+            }
+            $ecrit = ($a.Droits -band 0x2A) -ne 0
+            $lit = ($a.Droits -band 0x10) -ne 0
+            $signe = $false
+            $interprete = $nom -match '(?i)^(powershell|pwsh|python\w*|pythonw|java|javaw|cmd|wscript|cscript|mshta|rundll32|node|autohotkey\w*)$'
+            if ($chemin -and -not $interprete -and (Test-Path -LiteralPath $chemin)) { try { $signe = ((Get-AuthenticodeSignature -LiteralPath $chemin).Status -eq 'Valid') } catch { } }
+            if ($interprete -and $pr -and $pr.CommandLine) { $det += ' · script lancé : ' + ("$($pr.CommandLine)".Substring(0, [Math]::Min(180, "$($pr.CommandLine)".Length))) }
+            if ($ecrit) {
+                $suspects++
+                $niv = $(if ($signe -and $nom -notmatch $SS_RegexNom -and $nom -notmatch $SS_RegexProgramme) { 'ORANGE' } else { 'ROUGE' })
+                Add-Res Programmes $niv ('Peut MODIFIER Minecraft : ' + $nom) ($det + ' · ' + $(if ($signe) { 'programme signé' } else { 'programme NON signé' }) + ' : un programme inconnu qui écrit dans le jeu = injecteur ou cheat externe possible') $chemin
+            } elseif ($lit) {
+                $suspects++
+                Add-Res Programmes ORANGE ('LIT la mémoire de Minecraft : ' + $nom) ($det + ' · peut servir à un cheat externe (ESP, radar) : demande au joueur ce que c''est') $chemin
+            } else {
+                Add-Res Programmes INFO ('Ouvre Minecraft : ' + $nom) ($det + ' · ne peut ni lire ni modifier le jeu') $chemin
+            }
+        }
+        if ($suspects -eq 0) { Add-Res Programmes OK 'Programmes qui touchent à Minecraft' ('Aucun programme inconnu ne lit ni ne modifie le jeu (PID {0}).' -f $jeu.ProcessId) }
+        if ($mode -eq 'utilisateur' -and $ill -gt 0) {
+            Add-Res Programmes INFO 'Programmes protégés non vérifiés' ("$ill programme(s) système ou lancés en administrateur n'ont pas pu être vérifiés : relance l'outil en administrateur pour tout voir.")
+        }
+    }
+}
+
 function Invoke-ScanProgrammes {
+    Invoke-ScanAccesJeu
     Set-Etape 68 'Programmes ouverts...'
     $rien = $true
     foreach ($pr in @(Get-CimInstance Win32_Process)) {
@@ -959,13 +1178,25 @@ function Invoke-ScanProgrammes {
             }
         }
     }
-    foreach ($en in ($entrees | Sort-Object Date -Descending | Select-Object -First 50)) {
+    # pendant la partie (depuis 10 min avant le lancement du jeu) : détaillé ; avant : résumé en une ligne
+    $debutPartie = $null
+    if ($script:SS_LancementJeu) { $debutPartie = $script:SS_LancementJeu.AddMinutes(-10) }
+    $avant = @()
+    foreach ($en in ($entrees | Sort-Object Date -Descending)) {
         $nom = Split-Path $en.Exe -Leaf
-        if ($en.Exe -match $SS_RegexProgramme) { Add-Res Programmes ORANGE ('Lancé récemment : ' + $nom) ('{0} · {1}' -f (Format-Date $en.Date), $en.Exe) }
-        else { Add-Res Programmes INFO ('Lancé : ' + $nom) ('{0} · {1}' -f (Format-Date $en.Date), $en.Exe) }
+        $pendant = ($debutPartie -and $en.Date -ge $debutPartie)
+        if ($en.Exe -match $SS_RegexProgramme) { Add-Res Programmes ORANGE ($(if ($pendant) { 'Lancé PENDANT la partie : ' } else { 'Lancé récemment : ' }) + $nom) ('{0} · {1}' -f (Format-Date $en.Date), $en.Exe) }
+        elseif ($pendant) { Add-Res Programmes INFO ('Lancé pendant la partie : ' + $nom) ('{0} · {1}' -f (Format-Date $en.Date), $en.Exe) }
+        else { $avant += $nom }
     }
+    if ($avant.Count) { Add-Res Programmes INFO ("$($avant.Count) autre(s) programme(s) lancé(s) avant la partie") (($avant | Select-Object -Unique -First 40) -join ', ') }
+    $capture = (Test-Path "$env:LOCALAPPDATA\Medal") -or (Test-Path "$env:ProgramFiles\obs-studio") -or (Test-Path "$env:APPDATA\obs-studio")
     $pf = @(Get-ChildItem -Path "$env:windir\Prefetch" -Filter *.pf -Force | Where-Object { $_.LastWriteTime -ge $script:SS_Depuis -and $_.Name -match $SS_RegexProgramme })
-    foreach ($f in $pf) { Add-Res Programmes ORANGE ('Prefetch : ' + $f.Name) ('lancé le ' + (Format-Date $f.LastWriteTime)) $f.FullName }
+    foreach ($f in $pf) {
+        if ($f.Name -match '(?i)^INJECT-HELPER' -and $capture) {
+            Add-Res Programmes INFO ('Prefetch : ' + $f.Name) ('lancé le ' + (Format-Date $f.LastWriteTime) + ' · outil de capture de Medal / OBS (accroche l''enregistrement vidéo au jeu) : normal si le joueur enregistre ses parties') $f.FullName
+        } else { Add-Res Programmes ORANGE ('Prefetch : ' + $f.Name) ('lancé le ' + (Format-Date $f.LastWriteTime)) $f.FullName }
+    }
     if ($pf.Count -eq 0) { Add-Res Programmes OK 'Prefetch' 'Aucun programme suspect lancé récemment.' }
 }
 
