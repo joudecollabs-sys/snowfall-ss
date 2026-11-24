@@ -54,6 +54,7 @@ $SS_Categories = [ordered]@{
     Resume     = 'Résumé'
     Systeme    = 'Système'
     Minecraft  = 'Minecraft'
+    Logs       = 'Logs du jeu'
     Injection  = 'Injection / stream-proof'
     Mods       = 'Mods'
     Programmes = 'Programmes'
@@ -512,8 +513,170 @@ function Initialize-Poignees {
     if (-not ('SnowPoignees' -as [type])) { Add-Type -TypeDefinition $SS_CodePoignees -ErrorAction Stop }
 }
 
+$SS_CodeTouches = @'
+using System;
+using System.Runtime.InteropServices;
+public static class SnowTouches {
+    [StructLayout(LayoutKind.Sequential)] struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)] struct MOUSEINPUT { public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Explicit)] struct UNION { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }
+    [StructLayout(LayoutKind.Sequential)] struct INPUT { public uint type; public UNION u; }
+    [DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint n, INPUT[] inputs, int size);
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr h);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint a, uint b, bool attach);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
+
+    public static bool AuPremierPlan(IntPtr jeu) { return GetForegroundWindow() == jeu; }
+
+    // Met la fenetre du jeu au premier plan (restaure si reduite)
+    public static bool Activer(IntPtr jeu) {
+        if (IsIconic(jeu)) ShowWindow(jeu, 9);
+        if (SetForegroundWindow(jeu)) return true;
+        uint p; uint tAvant = GetWindowThreadProcessId(GetForegroundWindow(), out p);
+        uint moi = GetCurrentThreadId();
+        AttachThreadInput(moi, tAvant, true);
+        BringWindowToTop(jeu); bool ok = SetForegroundWindow(jeu);
+        AttachThreadInput(moi, tAvant, false);
+        return ok || GetForegroundWindow() == jeu;
+    }
+
+    public static int[] Rect(IntPtr h) { RECT r; GetWindowRect(h, out r); return new int[] { r.L, r.T, r.R, r.B }; }
+
+    // Appuie (ou relache) une touche par son code de balayage physique : independant du clavier AZERTY/QWERTY
+    public static bool Appui(ushort scan, bool etendue, bool relache) {
+        uint f = 0x0008 | (etendue ? 0x0001u : 0u) | (relache ? 0x0002u : 0u);
+        var e = new INPUT[1];
+        e[0].type = 1; e[0].u.ki.wScan = scan; e[0].u.ki.dwFlags = f;
+        return SendInput(1, e, Marshal.SizeOf(typeof(INPUT))) == 1;
+    }
+}
+'@
+
 function Initialize-Natif {
     if (-not ('SnowNatif' -as [type])) { Add-Type -TypeDefinition $SS_CodeNatif -ErrorAction Stop }
+}
+
+# Lecture des .pf du Prefetch : chemin complet de l'exe qui a ete lance
+$SS_CodePrefetch = @'
+using System;
+using System.IO;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class SnowPrefetch {
+    [DllImport("ntdll.dll")] static extern uint RtlGetCompressionWorkSpaceSize(ushort fmt, out uint ws, out uint fs);
+    [DllImport("ntdll.dll")] static extern uint RtlDecompressBufferEx(ushort fmt, byte[] dst, uint dstSize, byte[] src, uint srcSize, out uint final, byte[] ws);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern uint QueryDosDevice(string nom, StringBuilder cible, int max);
+    // Windows 10/11 : .pf compresse (en-tete "MAM") ; Windows 7/8 : brut
+    static byte[] Lire(string chemin) {
+        byte[] d = File.ReadAllBytes(chemin);
+        if (d.Length < 8 || d[0] != 0x4D || d[1] != 0x41 || d[2] != 0x4D) return d;
+        ushort fmt = (ushort)(d[3] & 0x0F);
+        int deb = (d[3] & 0xF0) != 0 ? 12 : 8;
+        uint taille = BitConverter.ToUInt32(d, 4), ws, fs, fin;
+        if (taille == 0 || taille > (64u << 20) || RtlGetCompressionWorkSpaceSize(fmt, out ws, out fs) != 0) return null;
+        byte[] src = new byte[d.Length - deb];
+        Array.Copy(d, deb, src, 0, src.Length);
+        byte[] o = new byte[taille];
+        if (RtlDecompressBufferEx(fmt, o, taille, src, (uint)src.Length, out fin, new byte[ws]) != 0) return null;
+        return o;
+    }
+    // Chemin de l'exe tel que Windows l'a enregistre (\VOLUME{...}\... ou \DEVICE\HARDDISKVOLUMEx\...), null si illisible
+    public static string Exe(string chemin) {
+        byte[] d = Lire(chemin);
+        if (d == null || d.Length < 0x6C || BitConverter.ToUInt32(d, 4) != 0x41434353) return null;
+        string nom = Encoding.Unicode.GetString(d, 0x10, 60).Split('\0')[0];
+        int off = BitConverter.ToInt32(d, 0x64), len = BitConverter.ToInt32(d, 0x68);
+        if (nom.Length == 0 || off <= 0 || len <= 0 || (long)off + len > d.Length) return null;
+        foreach (string f in Encoding.Unicode.GetString(d, off, len).Split('\0')) {
+            int i = f.LastIndexOf('\\');
+            if (i >= 0 && f.Substring(i + 1).StartsWith(nom, StringComparison.OrdinalIgnoreCase)) return f;
+        }
+        return null;
+    }
+    public static string Volume(string lettre) {
+        var sb = new StringBuilder(512);
+        return QueryDosDevice(lettre, sb, 512) == 0 ? null : sb.ToString();
+    }
+}
+'@
+
+function Initialize-Prefetch {
+    if (-not ('SnowPrefetch' -as [type])) { Add-Type -TypeDefinition $SS_CodePrefetch -ErrorAction Stop }
+}
+
+function Get-Volumes {
+    if ($null -eq $script:SS_Volumes) {
+        $script:SS_Volumes = @(foreach ($d in @(Get-CimInstance Win32_LogicalDisk)) {
+            [pscustomobject]@{ Lettre = $d.DeviceID; Serie = $d.VolumeSerialNumber; Device = [SnowPrefetch]::Volume($d.DeviceID) }
+        })
+    }
+    return $script:SS_Volumes
+}
+
+# \VOLUME{date-NUMSERIE}\... (Prefetch) ou \Device\HarddiskVolumeX\... (BAM) -> C:\...
+function Convert-CheminWindows {
+    param([string]$Brut)
+    if ($Brut -notmatch '^\\(?:VOLUME\{[0-9a-f]*-([0-9a-f]{8})\}|DEVICE\\HARDDISKVOLUME\d+)(\\.*)$') { return $Brut }
+    $serie = $Matches[1]; $rel = $Matches[2]
+    $device = $Brut.Substring(0, $Brut.Length - $rel.Length)
+    foreach ($v in @(Get-Volumes)) {
+        if (($serie -and $v.Serie -eq $serie) -or (-not $serie -and $v.Device -eq $device)) { return $v.Lettre + $rel }
+    }
+    return $rel
+}
+
+# Le nom d'un .pf finit par le hash du chemin complet de l'exe (\DEVICE\HARDDISKVOLUMEX\...)
+function Get-HashPrefetch {
+    param([string]$Chemin)
+    [uint64]$h = 314159
+    foreach ($b in [Text.Encoding]::Unicode.GetBytes($Chemin.ToUpperInvariant())) { $h = (($h * 37) + $b) % 4294967296 }
+    return ('{0:X8}' -f $h)
+}
+
+# Si le .pf est illisible : cherche parmi les vrais inject-helper de Medal / OBS celui dont le chemin donne ce hash
+function Find-InjectHelperParHash {
+    param([string]$NomPf)
+    if ($NomPf -notmatch '-([0-9A-F]{8})\.pf$') { return $null }
+    $cible = $Matches[1]
+    $cands = @(Get-ChildItem -Path "$env:LOCALAPPDATA\Medal\recorder-*\Host\inject-helper*.exe" -Force)
+    foreach ($r in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) { if ($r) { $cands += @(Get-ChildItem -LiteralPath "$r\obs-studio\data\obs-plugins\win-capture" -Filter 'inject-helper*.exe' -Force) } }
+    foreach ($c in $cands) {
+        $v = @(Get-Volumes) | Where-Object { $_.Lettre -eq $c.FullName.Substring(0, 2) } | Select-Object -First 1
+        if ($v -and $v.Device -and (Get-HashPrefetch ($v.Device + $c.FullName.Substring(2))) -eq $cible) { return $c.FullName }
+    }
+    return $null
+}
+
+# inject-helper*.exe = outil de capture video de Medal / OBS (accroche l'enregistrement au jeu).
+# Un cheat peut prendre ce nom : on verifie le dossier et la signature. Renvoie @(niveau, explication).
+function Get-AvisInjectHelper {
+    param([string]$Exe)
+    $outil = $null; $editeur = $null
+    if ($Exe -match '(?i)\\AppData\\Local\\Medal\\recorder-[\d.]+\\Host\\inject-helper(32|64)-v2\.exe$') { $outil = 'Medal'; $editeur = 'Ferox Games' }
+    elseif ($Exe -match '(?i)\\data\\obs-plugins\\win-capture\\inject-helper(32|64)\.exe$') { $outil = 'OBS' }
+    if (-not $outil) { return @('ORANGE', 'porte le nom de l''outil de capture de Medal / OBS mais n''est PAS dans leur dossier : faux nom possible, demande au joueur ce que c''est') }
+    if ($Exe -notmatch '^[a-z]:\\' -or -not (Test-Path -LiteralPath $Exe)) {
+        $medalLa = @(Get-ChildItem -Path "$env:LOCALAPPDATA\Medal\recorder-*\Host\inject-helper*-v2.exe" -Force).Count -gt 0
+        if ($outil -eq 'Medal' -and $medalLa -and -not (Test-Path -LiteralPath (Split-Path $Exe -Parent))) {
+            return @('INFO', 'outil de capture de Medal, ancienne version (Medal efface ses anciennes versions en se mettant à jour) : normal si le joueur enregistre ses parties')
+        }
+        return @('ORANGE', ('dossier de {0} mais l''exe n''existe plus : supprimé depuis, à demander au joueur' -f $outil))
+    }
+    $s = Get-AuthenticodeSignature -LiteralPath $Exe
+    $qui = ''
+    if ($s.SignerCertificate) { $qui = $s.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) }
+    $etat = '{0} ({1})' -f $(if ($qui) { $qui } else { 'aucune signature' }), $s.Status
+    if ($s.Status -eq 'HashMismatch') { return @('ROUGE', ('copie MODIFIÉE de l''outil de capture de {0} : signature cassée · {1}' -f $outil, $etat)) }
+    if ($editeur -and ($s.Status -ne 'Valid' -or $qui -notmatch [regex]::Escape($editeur))) { return @('ROUGE', ('imite l''outil de capture de Medal mais n''est pas signé par Medal ({0}) · {1}' -f $editeur, $etat)) }
+    if ($s.Status -ne 'Valid') { return @('ORANGE', ('dossier d''OBS mais exe non signé (vieille version d''OBS ou copie) · {0}' -f $etat)) }
+    return @('INFO', ('outil de capture de {0}, vérifié (bon dossier, signé {1}) : normal si le joueur enregistre ses parties' -f $outil, $qui))
 }
 
 # Ce qui a ete injecte dans le jeu (agents, options, DLL, threads)
@@ -662,6 +825,124 @@ function Invoke-ScanLogJeu {
         $m = [regex]::Match($txt, '(?i)\b(meteor ?client|wurst|aristois|liquidbounce|rusherhack|thunderhack|bleachhack|boze|doomsday|prestige ?client|vape|phobos|konas|earthhack|self.?destruct)\b')
         if ($m.Success) { Add-Res Injection ORANGE ('Nom de client de triche dans le log du jeu : ' + $m.Value) $log $log }
     }
+}
+
+# =====================================================================
+#  Logs du jeu : toutes les instances, 7 derniers jours (latest.log, .log.gz, crash-reports)
+# =====================================================================
+$SS_LogJours = 7
+$SS_ReClientLog = '(?i)\b(meteor[\s-]?client|meteordevelopment|net\.wurstclient|wurst[\s-]?client|aristois|liquidbounce|net\.ccbluex|rusherhack|thunderhack|bleachhack|boze[\s-]?client|dev\.boze|doomsday[\s-]?client|prestige[\s-]?client|vape[\s-]?(lite|v4)|phobos|konas|future[\s-]?client|earthhack|lvstrng|inertia[\s-]?client|coffee[\s-]?client|salhack|kami[\s-]?blue|lambda[\s-]?client|impact[\s-]?client|self[\s-]?destruct)\b'
+$SS_ReChatCheat = '\[CHAT\]\s*(?:<[^>]*>\s*)?[\[(<](Meteor|Wurst|LiquidBounce|Thunder\w*|Rusher\w*|Boze|Prestige|Argon|Aristois|BleachHack|Future|Inertia|Konas|Phobos|Vape|Doomsday|Lambda|Impact)[\])>]'
+$SS_ReToggle = '(?i)\b(toggled|enabled|disabled|activ[ée]e?|d[ée]sactiv[ée]e?)\b[^\r\n]{0,30}\b(KillAura|Kill Aura|TriggerBot|AimAssist|Aim Assist|AutoCrystal|CrystalAura|AnchorAura|Reach|Velocity|AutoTotem|Scaffold|Flight|NoFall|XRay|X-Ray|Freecam|AutoClicker|ESP|Tracers|Nuker|AutoAnchor|HitBoxes|Criticals)\b'
+
+function Read-Log {
+    param([string]$Fichier)
+    try {
+        $fs = New-Object IO.FileStream($Fichier, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+        try {
+            if ($fs.Length -gt 40MB) { return '' }
+            $st = $fs
+            if ($Fichier -like '*.gz') { $st = New-Object IO.Compression.GZipStream($fs, [IO.Compression.CompressionMode]::Decompress) }
+            $sr = New-Object IO.StreamReader($st, [Text.Encoding]::UTF8, $true)
+            $t = $sr.ReadToEnd(); $sr.Dispose(); return $t
+        } finally { $fs.Dispose() }
+    } catch { return '' }
+}
+
+function Invoke-ScanLogsJeu {
+    Set-Etape 66 'Lecture des logs du jeu...'
+    $depuis = (Get-Date).AddDays(-$SS_LogJours)
+    # dossiers de jeu : jeu lancé + parent de chaque dossier mods trouvé + .minecraft
+    $dossiers = [ordered]@{}
+    foreach ($j in $script:SS_Jeux) { if ($j.Dossier) { $dossiers[$j.Dossier.TrimEnd('\').ToLower()] = @{ Chemin = $j.Dossier.TrimEnd('\'); Jeu = $true } } }
+    foreach ($d in $script:SS_DossiersMods) {
+        $par = Split-Path $d.Chemin -Parent
+        if ($par -and (Test-Path -LiteralPath (Join-Path $par 'logs')) -and -not $dossiers.Contains($par.ToLower())) { $dossiers[$par.ToLower()] = @{ Chemin = $par; Jeu = $false } }
+    }
+    foreach ($x in "$env:APPDATA\.minecraft", "$env:APPDATA\.tlauncher\legacy\Minecraft\game") {
+        if ((Test-Path -LiteralPath (Join-Path $x 'logs')) -and -not $dossiers.Contains($x.ToLower())) { $dossiers[$x.ToLower()] = @{ Chemin = $x; Jeu = $false } }
+    }
+    $lunar = "$env:USERPROFILE\.lunarclient\logs"
+    $alertes = 0; $nbFichiers = 0
+    $serveurs = [ordered]@{}
+    $traiter = {
+        param([string]$Fichier, [string]$Etiquette, $Ids)
+        $t = Read-Log $Fichier
+        if (-not $t) { return }
+        $script:SS_LogNb++
+        $fi = Get-Item -LiteralPath $Fichier -Force
+        $quand = Format-Date $fi.LastWriteTime
+        $source = '[' + $Etiquette + '] ' + $fi.Name + ' · ' + $quand
+        $lignes = $t -split "`r?`n"
+        $vusL = $script:SS_LogVus; $nbIci = 0
+        $dansListe = $false
+        foreach ($l in $lignes) {
+            if ($l -match 'Loading \d+ mods:') { $dansListe = $true; continue }
+            if ($dansListe) {
+                if ($l -match '^\t- ([A-Za-z0-9_\-\.]+) ') { if ($Ids -ne $null -and -not $Ids.ContainsKey($Matches[1])) { $Ids[$Matches[1]] = $fi.LastWriteTime }; continue }
+                if ($l -match '^\t\s') { continue }
+                $dansListe = $false
+            }
+            if ($l -match 'Connecting to ([^\s,]+),\s*(\d+)') { $cle = $Matches[1].ToLower(); if (-not $serveurs.Contains($cle)) { $serveurs[$cle] = $fi.LastWriteTime } elseif ($fi.LastWriteTime -gt $serveurs[$cle]) { $serveurs[$cle] = $fi.LastWriteTime }; continue }
+            $chat = $l -match '\[CHAT\]'
+            $type = $null; $niv = 'ORANGE'
+            if ($l -match $SS_ReChatCheat) { $type = 'Message d''un client de triche dans le chat'; $niv = 'ROUGE' }
+            elseif ($l -match $SS_ReToggle -and ($l -match '\[CHAT\]\s*(\[|§)' -or -not $chat)) { $type = 'Module de triche activé / désactivé'; $niv = 'ROUGE' }
+            elseif (-not $chat -and $l -match $SS_ReClientLog) { $type = 'Client de triche dans les lignes techniques du jeu'; $niv = 'ROUGE' }
+            elseif (-not $chat -and $l -match '(?i)\bbaritone\b') { $type = 'Baritone (bot de déplacement / minage)' }
+            elseif ($l -match '(?i)(disconnect|kicked|lost connection|connection lost|déconnecté|expulsé)' -and $l -match '(?i)(cheat|hack|kill\s?aura|reach|fly|anti-?cheat|ban|sanction|triche)') { $type = 'Expulsé d''un serveur (motif lié à la triche)' }
+            if (-not $type) { continue }
+            $cle = $type + '|' + ($l -replace '^\[[^\]]*\]\s*', '' -replace '\d', '').Trim()
+            if ($vusL.ContainsKey($cle)) { $vusL[$cle]++; continue }
+            $vusL[$cle] = 1; $nbIci++
+            if ($nbIci -gt 12) { break }
+            $script:SS_LogAlertes++
+            $extrait = ($l.Trim() -replace '§.', '')
+            if ($extrait.Length -gt 220) { $extrait = $extrait.Substring(0, 220) + '…' }
+            Add-Res Logs $niv ($type) ($extrait + ' · ' + $source) $Fichier
+        }
+    }
+    $script:SS_LogNb = 0; $script:SS_LogAlertes = 0; $script:SS_LogVus = @{}
+    foreach ($d in $dossiers.Values) {
+        $l = Get-LauncherChemin $d.Chemin
+        $etiq = Format-Launcher $l
+        $ids = @{}
+        $fichiers = @(Get-ChildItem -LiteralPath (Join-Path $d.Chemin 'logs') -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)\.log(\.gz)?$' -and $_.LastWriteTime -ge $depuis } | Sort-Object LastWriteTime -Descending | Select-Object -First 40)
+        $crash = @(Get-ChildItem -LiteralPath (Join-Path $d.Chemin 'crash-reports') -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $depuis })
+        if ($d.Jeu -and -not (Test-Path -LiteralPath (Join-Path $d.Chemin 'logs\latest.log'))) {
+            $script:SS_LogAlertes++
+            Add-Res Logs ORANGE ('Pas de latest.log alors que le jeu tourne : ' + $etiq) 'Le log de la partie en cours a été supprimé ou désactivé : demande au joueur pourquoi.' (Join-Path $d.Chemin 'logs')
+        }
+        if ($fichiers.Count -eq 0 -and $crash.Count -eq 0) { continue }
+        foreach ($f in $fichiers) { & $traiter $f.FullName $etiq $ids; Invoke-Pompe }
+        foreach ($f in $crash) {
+            $t = Read-Log $f.FullName
+            if ($t -match $SS_ReClientLog) { $script:SS_LogAlertes++; Add-Res Logs ROUGE 'Rapport de crash qui cite un client de triche' ($Matches[0] + ' · [' + $etiq + '] ' + $f.Name + ' · ' + (Format-Date $f.LastWriteTime)) $f.FullName }
+        }
+        # mods chargés pendant une partie passée mais absents aujourd'hui (fabric / quilt)
+        if ($ids.Count) {
+            $presents = @{}
+            foreach ($jar in @(Get-ChildItem -LiteralPath (Join-Path $d.Chemin 'mods') -Filter *.jar -File -Force -ErrorAction SilentlyContinue)) { $id = Get-ModIdRapide $jar.FullName; if ($id) { $presents[$id.ToLower()] = $true } }
+            $integres = '^(minecraft|java|fabricloader|quilt_loader|mixinextras|fabric-api-base|fabric-api|fabric|quilted_fabric_api|qsl)$'
+            $partis = @($ids.Keys | Where-Object { $_ -notmatch $integres -and -not $presents.ContainsKey($_.ToLower()) } | Sort-Object)
+            if ($partis.Count) {
+                $script:SS_LogAlertes++
+                $triche = @($partis | Where-Object { $_ -match $SS_RegexNom })
+                $niv = $(if ($triche.Count) { 'ROUGE' } else { 'ORANGE' })
+                $liste = ($partis | ForEach-Object { '{0} ({1:dd/MM})' -f $_, $ids[$_] }) -join ', '
+                Add-Res Logs $niv ('Mods utilisés ces ' + $SS_LogJours + ' jours mais plus dans le dossier : ' + $etiq) ($liste + ' · ils apparaissent dans les logs d''une partie passée mais leur jar n''est plus là (supprimé, ou mod d''un autre profil)') (Join-Path $d.Chemin 'mods')
+            }
+        }
+        Add-Res Logs INFO ('Logs lus : ' + $etiq) ('{0} fichier(s) de log et {1} rapport(s) de crash des {2} derniers jours · {3}' -f $fichiers.Count, $crash.Count, $SS_LogJours, $d.Chemin) (Join-Path $d.Chemin 'logs')
+    }
+    if (Test-Path -LiteralPath $lunar) {
+        foreach ($f in @(Get-ChildItem -LiteralPath $lunar -Recurse -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)\.log(\.gz)?$' -and $_.LastWriteTime -ge $depuis } | Select-Object -First 30)) { & $traiter $f.FullName 'Lunar Client' $null }
+    }
+    if ($serveurs.Count) {
+        Add-Res Logs INFO ('Serveurs rejoints ces ' + $SS_LogJours + ' jours : ' + $serveurs.Count) (($serveurs.Keys | ForEach-Object { '{0} ({1:dd/MM HH:mm})' -f $_, $serveurs[$_] }) -join ', ')
+    }
+    if ($script:SS_LogNb -eq 0) { Add-Res Logs INFO 'Logs du jeu' ('Aucun log de moins de ' + $SS_LogJours + ' jours trouvé (jeu jamais lancé récemment, ou logs supprimés).') }
+    elseif ($script:SS_LogAlertes -eq 0) { Add-Res Logs OK 'Logs du jeu' ('{0} fichier(s) lus : aucun client de triche, module activé, Baritone ni kick pour triche.' -f $script:SS_LogNb) }
 }
 
 function Get-ModIdRapide {
@@ -1165,6 +1446,7 @@ function Invoke-ScanProgrammes {
         Add-Res Programmes INFO 'Historique BAM / Prefetch' 'Non vérifié : il faut lancer PowerShell en administrateur.'
         return
     }
+    try { Initialize-Prefetch } catch { }
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $cle = "HKLM:\SYSTEM\CurrentControlSet\Services\bam\State\UserSettings\$sid"
     if (-not (Test-Path $cle)) { $cle = "HKLM:\SYSTEM\CurrentControlSet\Services\bam\UserSettings\$sid" }
@@ -1174,7 +1456,7 @@ function Invoke-ScanProgrammes {
         foreach ($pp in $props.PSObject.Properties) {
             if ($pp.Value -is [byte[]] -and $pp.Value.Length -ge 8) {
                 $date = [DateTime]::FromFileTime([BitConverter]::ToInt64($pp.Value, 0))
-                if ($date -ge $script:SS_Depuis) { $entrees += [pscustomobject]@{ Date = $date; Exe = ($pp.Name -replace '^\\Device\\HarddiskVolume\d+', '') } }
+                if ($date -ge $script:SS_Depuis) { $entrees += [pscustomobject]@{ Date = $date; Exe = (Convert-CheminWindows $pp.Name) } }
             }
         }
     }
@@ -1185,17 +1467,29 @@ function Invoke-ScanProgrammes {
     foreach ($en in ($entrees | Sort-Object Date -Descending)) {
         $nom = Split-Path $en.Exe -Leaf
         $pendant = ($debutPartie -and $en.Date -ge $debutPartie)
-        if ($en.Exe -match $SS_RegexProgramme) { Add-Res Programmes ORANGE ($(if ($pendant) { 'Lancé PENDANT la partie : ' } else { 'Lancé récemment : ' }) + $nom) ('{0} · {1}' -f (Format-Date $en.Date), $en.Exe) }
+        if ($nom -match '(?i)^inject-helper') {
+            $avis = Get-AvisInjectHelper $en.Exe
+            Add-Res Programmes $avis[0] ($(if ($pendant) { 'Lancé PENDANT la partie : ' } else { 'Lancé récemment : ' }) + $nom) ('{0} · {1} · {2}' -f (Format-Date $en.Date), $en.Exe, $avis[1]) $en.Exe
+        }
+        elseif ($en.Exe -match $SS_RegexProgramme) { Add-Res Programmes ORANGE ($(if ($pendant) { 'Lancé PENDANT la partie : ' } else { 'Lancé récemment : ' }) + $nom) ('{0} · {1}' -f (Format-Date $en.Date), $en.Exe) }
         elseif ($pendant) { Add-Res Programmes INFO ('Lancé pendant la partie : ' + $nom) ('{0} · {1}' -f (Format-Date $en.Date), $en.Exe) }
         else { $avant += $nom }
     }
     if ($avant.Count) { Add-Res Programmes INFO ("$($avant.Count) autre(s) programme(s) lancé(s) avant la partie") (($avant | Select-Object -Unique -First 40) -join ', ') }
-    $capture = (Test-Path "$env:LOCALAPPDATA\Medal") -or (Test-Path "$env:ProgramFiles\obs-studio") -or (Test-Path "$env:APPDATA\obs-studio")
     $pf = @(Get-ChildItem -Path "$env:windir\Prefetch" -Filter *.pf -Force | Where-Object { $_.LastWriteTime -ge $script:SS_Depuis -and $_.Name -match $SS_RegexProgramme })
     foreach ($f in $pf) {
-        if ($f.Name -match '(?i)^INJECT-HELPER' -and $capture) {
-            Add-Res Programmes INFO ('Prefetch : ' + $f.Name) ('lancé le ' + (Format-Date $f.LastWriteTime) + ' · outil de capture de Medal / OBS (accroche l''enregistrement vidéo au jeu) : normal si le joueur enregistre ses parties') $f.FullName
-        } else { Add-Res Programmes ORANGE ('Prefetch : ' + $f.Name) ('lancé le ' + (Format-Date $f.LastWriteTime)) $f.FullName }
+        $exe = $null
+        if ('SnowPrefetch' -as [type]) { try { $brut = [SnowPrefetch]::Exe($f.FullName); if ($brut) { $exe = Convert-CheminWindows $brut } } catch { } }
+        $quand = 'lancé le ' + (Format-Date $f.LastWriteTime)
+        if ($f.Name -match '(?i)^INJECT-HELPER') {
+            if (-not $exe) { $exe = Find-InjectHelperParHash $f.Name }
+            if ($exe) {
+                $avis = Get-AvisInjectHelper $exe
+                Add-Res Programmes $avis[0] ('Prefetch : ' + $f.Name) ('{0} · {1} · {2}' -f $quand, $exe, $avis[1]) $f.FullName
+            } else {
+                Add-Res Programmes ORANGE ('Prefetch : ' + $f.Name) ($quand + ' · chemin de l''exe illisible et absent des dossiers de Medal / OBS : impossible de vérifier que c''est leur outil de capture') $f.FullName
+            }
+        } else { Add-Res Programmes ORANGE ('Prefetch : ' + $f.Name) ($quand + $(if ($exe) { ' · ' + $exe })) $f.FullName }
     }
     if ($pf.Count -eq 0) { Add-Res Programmes OK 'Prefetch' 'Aucun programme suspect lancé récemment.' }
 }
@@ -1978,6 +2272,7 @@ function Start-Scan {
     $script:SS_NbHistUsb = 0
     $script:SS_NbUsbPresents = 0
     $script:SS_Usb = @()
+    $script:SS_Volumes = $null
     $script:SS_Depuis = (Get-Date).AddHours(-$SS_Heures)
     if ($script:UI) {
         foreach ($b in $script:UI.Actions) { $b.IsEnabled = $false }
@@ -1992,6 +2287,7 @@ function Start-Scan {
         Invoke-ScanMinecraft
         Invoke-ScanMods
         Invoke-ScanLogJeu
+        Invoke-ScanLogsJeu
         Invoke-ScanProgrammes
         Invoke-ScanMacros
         Invoke-ScanStreamProof
@@ -2105,6 +2401,90 @@ function Show-Categorie {
     if (-not $memeCat) { $script:UI.Defile.ScrollToTop() }
     $script:ChangeNav = $true
     try { $script:UI.Nav[$Cle].Bouton.IsChecked = $true } finally { $script:ChangeNav = $false }
+}
+
+# Touches qui ouvrent souvent un menu de cheat et ne font rien en vanilla
+# (nom, code de balayage physique, touche étendue)
+$SS_TouchesMenu = @(
+    @('Shift droit', 0x36, $false), @('Inser', 0x52, $true), @('Suppr', 0x53, $true), @('Origine (Home)', 0x47, $true),
+    @('Fin (End)', 0x4F, $true), @('Page haut', 0x49, $true), @('Page bas', 0x51, $true), @('Ctrl droit', 0x1D, $true),
+    @('Alt Gr / Alt droit', 0x38, $true), @('² / ` (sous Échap)', 0x29, $false), @('F12', 0x58, $false), @('F9', 0x43, $false),
+    @('Pavé num. 0', 0x52, $false), @('Pavé num. 5', 0x4C, $false), @('Pavé num. Entrée', 0x1C, $true), @('Ù / apostrophe', 0x28, $false),
+    @('* / antislash', 0x2B, $false), @('M / point-virgule', 0x27, $false)
+)
+
+function Wait-Pompe {
+    param([int]$Ms)
+    $fin = (Get-Date).AddMilliseconds($Ms)
+    while ((Get-Date) -lt $fin) { Invoke-PompeUi; Start-Sleep -Milliseconds 30 }
+}
+
+function Start-TestTouches {
+    param([IntPtr]$Hwnd = [IntPtr]::Zero, [switch]$SansConfirmation, $Touches = $SS_TouchesMenu, [int]$Attente = 2200)
+    if (-not ('SnowTouches' -as [type])) { Add-Type -TypeDefinition $SS_CodeTouches -ErrorAction Stop }
+    $nomJeu = 'Minecraft'
+    if ($Hwnd -eq [IntPtr]::Zero) {
+        foreach ($j in @(Get-CimInstance Win32_Process -Filter "Name='java.exe' OR Name='javaw.exe'")) {
+            if ("$($j.CommandLine)" -and "$($j.CommandLine)" -notmatch $SS_RegexJeu) { continue }
+            $gp = Get-Process -Id $j.ProcessId -ErrorAction SilentlyContinue
+            if ($gp -and $gp.MainWindowHandle -ne [IntPtr]::Zero) { $Hwnd = $gp.MainWindowHandle; $nomJeu = "Minecraft (PID $($j.ProcessId))"; break }
+        }
+    }
+    if ($Hwnd -eq [IntPtr]::Zero) {
+        [void][System.Windows.MessageBox]::Show($script:UI.Fenetre, 'Minecraft n''est pas ouvert (ou sa fenêtre est introuvable). Demande au joueur de lancer le jeu, puis réessaie.', 'Tester les touches', 'OK', 'Warning')
+        return
+    }
+    if (-not $SansConfirmation) {
+        $msg = "Le jeu va passer au premier plan et l'outil va appuyer sur $($Touches.Count) touches, une toutes les 3 secondes environ (chaque touche 2 fois : ouvrir puis refermer).`n`n" +
+               "Regarde le stream du joueur : si un menu de cheat s'ouvre, le nom de la touche est affiché en haut de l'écran.`n`n" +
+               "Demande au joueur de ne pas toucher son clavier pendant le test (environ $([int]($Touches.Count * ($Attente + 900) / 1000)) s)."
+        if ([System.Windows.MessageBox]::Show($script:UI.Fenetre, $msg, 'Tester les touches', 'OKCancel', 'Information') -ne 'OK') { return }
+    }
+    foreach ($b in $script:UI.Actions) { $b.IsEnabled = $false }
+    # Petite étiquette en haut de l'écran du jeu (ne prend pas le focus)
+    $etiq = New-Object System.Windows.Window
+    $etiq.WindowStyle = 'None'; $etiq.AllowsTransparency = $true; $etiq.Topmost = $true; $etiq.ShowActivated = $false
+    $etiq.ShowInTaskbar = $false; $etiq.SizeToContent = 'WidthAndHeight'; $etiq.Background = [System.Windows.Media.Brushes]::Transparent
+    $bord = New-Object System.Windows.Controls.Border
+    $bord.Background = (New-Pinceau '#E6111317'); $bord.BorderBrush = $script:Pinceaux.ACCENT.C; $bord.BorderThickness = 1; $bord.CornerRadius = 4; $bord.Padding = '14,8'
+    $txt = New-Object System.Windows.Controls.TextBlock
+    $txt.Foreground = (New-Pinceau '#F1F3F6'); $txt.FontFamily = 'Segoe UI'; $txt.FontSize = 15; $txt.FontWeight = 'SemiBold'
+    $bord.Child = $txt; $etiq.Content = $bord
+    $r = [SnowTouches]::Rect($Hwnd)
+    $etiq.Left = $r[0] + 24; $etiq.Top = $r[1] + 40
+    $faites = @(); $arret = $null
+    try {
+        if (-not [SnowTouches]::Activer($Hwnd)) { $arret = 'impossible de mettre le jeu au premier plan' }
+        $etiq.Show()
+        Wait-Pompe 900
+        $i = 0
+        foreach ($t in $Touches) {
+            if ($arret) { break }
+            $i++
+            $txt.Text = ('SnowFall SS · test de touche {0}/{1} : {2}' -f $i, $Touches.Count, $t[0])
+            if (-not [SnowTouches]::AuPremierPlan($Hwnd)) {
+                [void][SnowTouches]::Activer($Hwnd); Wait-Pompe 400
+                if (-not [SnowTouches]::AuPremierPlan($Hwnd)) { $arret = 'le jeu n''est plus au premier plan (le joueur a changé de fenêtre)'; break }
+            }
+            foreach ($fois in 1, 2) {
+                [void][SnowTouches]::Appui([uint16]$t[1], [bool]$t[2], $false); Wait-Pompe 70
+                [void][SnowTouches]::Appui([uint16]$t[1], [bool]$t[2], $true)
+                Wait-Pompe $(if ($fois -eq 1) { $Attente } else { 700 })
+            }
+            $faites += $t[0]
+        }
+    } finally {
+        $etiq.Close()
+        foreach ($b in $script:UI.Actions) { $b.IsEnabled = $true }
+        try { $script:UI.Fenetre.Activate() | Out-Null } catch { }
+    }
+    $det = ('{0} à {1:HH:mm:ss} · touches : {2}' -f $nomJeu, (Get-Date), ($faites -join ', '))
+    if ($arret) { Add-Res Minecraft ORANGE ('Test des touches arrêté : ' + $arret) $det }
+    else { Add-Res Minecraft INFO ('Test des touches de menu : ' + $faites.Count + ' touche(s) appuyée(s)') ($det + ' · si un menu s''est ouvert sur le stream, note la touche') }
+    Save-Rapport
+    Update-Navigation
+    Show-Categorie $script:CatActive
+    $script:UI.Statut.Text = $(if ($arret) { 'Test des touches arrêté : ' + $arret } else { ('Test des touches terminé ({0} touches)' -f $faites.Count) })
 }
 
 function Update-FiltreLaunchers {
@@ -2400,7 +2780,7 @@ $SS_Xaml = @'
           <DockPanel Margin="0,12,0,14">
             <StackPanel DockPanel.Dock="Bottom" Margin="20,0">
               <TextBlock Text="LECTURE SEULE" Style="{StaticResource Etiquette}"/>
-              <TextBlock Text="Aucun fichier modifié, supprimé ou envoyé (sauf les empreintes des mods à Modrinth)." TextWrapping="Wrap" FontSize="11" Foreground="#565B65" Margin="0,4,0,0"/>
+              <TextBlock Text="Aucun fichier modifié, supprimé ou envoyé (sauf les empreintes des mods à Modrinth). « Tester les touches » appuie seulement sur des touches dans le jeu, quand tu cliques." TextWrapping="Wrap" FontSize="11" Foreground="#565B65" Margin="0,4,0,0"/>
             </StackPanel>
             <StackPanel x:Name="Nav"/>
           </DockPanel>
@@ -2420,6 +2800,7 @@ $SS_Xaml = @'
           <!-- Progression + actions -->
           <DockPanel>
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center" Margin="20,0,0,0">
+              <Button x:Name="BtnTouches" Style="{StaticResource Btn}" Content="Tester les touches" ToolTip="Met Minecraft au premier plan et appuie sur les touches qui ouvrent les menus de cheat (Shift droit, Inser, Suppr...)"/>
               <Button x:Name="BtnCopier" Style="{StaticResource Btn}" Content="Copier le rapport"/>
               <Button x:Name="BtnOuvrir" Style="{StaticResource Btn}" Content="Ouvrir le rapport"/>
               <Button x:Name="BtnRelancer" Style="{StaticResource BtnPrimaire}" Content="Relancer le scan"/>
@@ -2545,10 +2926,10 @@ function New-Interface {
     foreach ($nom in 'Racine', 'BarreTitre', 'SousTitre', 'InfoPc', 'BadgeAdmin', 'IconeAdmin', 'TexteAdmin', 'BtnMin', 'BtnFermer',
                      'Nav', 'Rond', 'IconeVerdict', 'Verdict', 'SousVerdict', 'BarreFond', 'Barre', 'Statut',
                      'StatRouge', 'StatOrange', 'StatMods', 'StatUsb', 'StatUsbSous', 'TitreListe', 'CompteListe', 'InfoVersion', 'FiltreLaunchers',
-                     'Defile', 'Liste', 'BtnCopier', 'BtnOuvrir', 'BtnRelancer', 'InfoRapport') {
+                     'Defile', 'Liste', 'BtnCopier', 'BtnOuvrir', 'BtnRelancer', 'InfoRapport', 'BtnTouches') {
         $ui[$nom] = $w.FindName($nom)
     }
-    $ui.Actions = @($ui.BtnCopier, $ui.BtnOuvrir, $ui.BtnRelancer)
+    $ui.Actions = @($ui.BtnTouches, $ui.BtnCopier, $ui.BtnOuvrir, $ui.BtnRelancer)
 
     $ui.SousTitre.Text = "RAPPORT DE SCREENSHARE · WINDOWS"
     $ui.InfoPc.Text = "$env:COMPUTERNAME / $env:USERNAME"
@@ -2623,6 +3004,7 @@ function New-Interface {
     $ui.BtnFermer.Add_Click({ $script:UI.Fenetre.Close() })
     $ui.BtnRelancer.Add_Click({ Start-Scan })
     $ui.BtnOuvrir.Add_Click({ if ($script:SS_Fichier -and (Test-Path -LiteralPath $script:SS_Fichier)) { Start-Process notepad.exe -ArgumentList ('"' + $script:SS_Fichier + '"') } })
+    $ui.BtnTouches.Add_Click({ Start-TestTouches })
     $ui.BtnCopier.Add_Click({
         [System.Windows.Clipboard]::SetText((Get-TexteRapport))
         $script:UI.Statut.Text = 'Rapport copié dans le presse-papiers'
